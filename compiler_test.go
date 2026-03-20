@@ -1,0 +1,263 @@
+package caddyconsul
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestCompile_EmptyRoutes(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	result := rc.Compile(nil)
+
+	assert.Empty(t, result.HTTPRoutes)
+	assert.Empty(t, result.TCPRoutes)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_SingleHTTPRoute(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "web",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/",
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:8080", Healthy: true},
+			},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Equal(t, "app.example.com", result.HTTPRoutes[0].Host)
+	assert.Equal(t, "/", result.HTTPRoutes[0].Path)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_SingleTCPRoute(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true},
+			},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.TCPRoutes, 1)
+	assert.Equal(t, 5432, result.TCPRoutes[0].Port)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_DuplicateHostPath_FirstSeenWins(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "alpha",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/api",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+		{
+			ServiceName: "beta",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/api",
+			Upstreams:   []Upstream{{Address: "10.0.0.2:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Equal(t, "alpha", result.HTTPRoutes[0].ServiceName)
+
+	require.Len(t, result.Conflicts, 1)
+	assert.Equal(t, ConflictDuplicateHostPath, result.Conflicts[0].Type)
+	assert.Equal(t, "alpha", result.Conflicts[0].Winner.ServiceName)
+	assert.Equal(t, "beta", result.Conflicts[0].Loser.ServiceName)
+}
+
+func TestCompile_PriorityWins(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "low-priority",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/",
+			Priority:    10,
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+		{
+			ServiceName: "high-priority",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/",
+			Priority:    100,
+			Upstreams:   []Upstream{{Address: "10.0.0.2:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Equal(t, "high-priority", result.HTTPRoutes[0].ServiceName)
+
+	require.Len(t, result.Conflicts, 1)
+	assert.Equal(t, "low-priority", result.Conflicts[0].Loser.ServiceName)
+}
+
+func TestCompile_DifferentPaths_NoConflict(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "api",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/api",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+		{
+			ServiceName: "web",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/web",
+			Upstreams:   []Upstream{{Address: "10.0.0.2:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Len(t, result.HTTPRoutes, 2)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_DuplicateTCPPort_FirstSeenWins(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "pg-primary",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams:   []Upstream{{Address: "10.0.0.1:5432", Healthy: true}},
+		},
+		{
+			ServiceName: "pg-replica",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams:   []Upstream{{Address: "10.0.0.2:5432", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.TCPRoutes, 1)
+	assert.Equal(t, "pg-primary", result.TCPRoutes[0].ServiceName)
+
+	require.Len(t, result.Conflicts, 1)
+	assert.Equal(t, ConflictDuplicatePortSNI, result.Conflicts[0].Type)
+}
+
+func TestCompile_TCPSamePotDifferentSNI_NoConflict(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "db1",
+			Protocol:    ProtocolTLSPassthrough,
+			Port:        5432,
+			Host:        "db1.example.com",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:5432", Healthy: true}},
+		},
+		{
+			ServiceName: "db2",
+			Protocol:    ProtocolTLSPassthrough,
+			Port:        5432,
+			Host:        "db2.example.com",
+			Upstreams:   []Upstream{{Address: "10.0.0.2:5432", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Len(t, result.TCPRoutes, 2)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_NoHealthyUpstreams_Skipped(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "down",
+			Protocol:    ProtocolHTTP,
+			Host:        "down.example.com",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: false}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Empty(t, result.HTTPRoutes)
+	assert.Empty(t, result.Conflicts)
+}
+
+func TestCompile_UnknownProtocol_Warning(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "weird",
+			Protocol:    Protocol("udp"),
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Empty(t, result.HTTPRoutes)
+	assert.Empty(t, result.TCPRoutes)
+	require.Len(t, result.Warnings, 1)
+	assert.Contains(t, result.Warnings[0], "unknown protocol")
+}
+
+func TestCompile_StripPrefix(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "api",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/api",
+			StripPrefix: true,
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.True(t, result.HTTPRoutes[0].StripPrefix)
+}
+
+func TestCompile_MixedProtocols(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName: "web",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams:   []Upstream{{Address: "10.0.0.2:5432", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Len(t, result.HTTPRoutes, 1)
+	assert.Len(t, result.TCPRoutes, 1)
+	assert.Empty(t, result.Conflicts)
+}

@@ -1,0 +1,60 @@
+services:
+  consul:
+    image: hashicorp/consul:latest
+    command: agent -dev -client=0.0.0.0
+    ports:
+      - "8500:8500"
+    healthcheck:
+      test: ["CMD", "consul", "members"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - consul-test
+
+  caddy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: caddy-consul-integration-test:latest
+    depends_on:
+      consul:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "8443:443/udp"  # HTTP/3 (QUIC)
+      - "2019:2019"
+      - "15432:15432"   # TCP test port (postgres-like)
+      - "13306:13306"   # TCP test port (mysql-like)
+    volumes:
+      - ./integration-test/etc/Caddyfile:/etc/caddy/Caddyfile:ro
+    environment:
+      - CONSUL_HTTP_ADDR=consul:8500
+    networks:
+      - consul-test
+
+  # Plain HTTP echo service (non-Connect)
+  echo-http:
+    image: hashicorp/http-echo
+    command: ["-text=hello-from-echo", "-listen=:8080"]
+    networks:
+      - consul-test
+
+  # Connect-enabled echo service (backend for Connect tests)
+  echo-connect:
+    image: hashicorp/http-echo
+    command: ["-text=hello-from-connect", "-listen=:8080"]
+    networks:
+      - consul-test
+
+  # TCP echo service (backend for TCP routing tests)
+  echo-tcp:
+    image: alpine/socat
+    command: TCP-LISTEN:9000,fork,reuseaddr SYSTEM:'echo TCP-OK'
+    networks:
+      - consul-test
+
+networks:
+  consul-test:
+    driver: bridge

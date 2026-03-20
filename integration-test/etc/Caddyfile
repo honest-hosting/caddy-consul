@@ -1,0 +1,27 @@
+{
+	debug
+
+	admin :2019
+
+	# Use internal/self-signed certs for testing
+	local_certs
+
+	consul {
+		address consul:8500
+		health_policy passing
+		debounce 200ms
+		connect_service_name caddy-test-ingress
+		connect_auto_register true
+	}
+}
+
+# Plain HTTP
+http://caddy.localdev {
+	respond "caddy-consul integration test h1" 200
+}
+
+# HTTPS with wildcard internal cert for *.localdev
+*.localdev {
+	tls internal
+	respond "caddy-consul integration test h2h3" 200
+}
