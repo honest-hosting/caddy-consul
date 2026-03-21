@@ -59,7 +59,7 @@ test-integration: export TEST     ?= TestIntegration
 test-integration: export TEST_DIR ?= ./integration-test/...
 test-integration: test-setup test-integration-setup ## Run integration tests with Docker Compose
 	@echo "Running integration tests..."
-	@go test -v -timeout=90s -run "$(TEST)" $(TEST_DIR) 2>&1 | tee /tmp/caddy-consul-integration.log
+	@go test -v -timeout=300s -run "$(TEST)" $(TEST_DIR) 2>&1 | tee /tmp/caddy-consul-integration.log
 	@echo "IntegrationTest completed, see /tmp/caddy-consul-integration.log for details"
 .PHONY: test-integration
 

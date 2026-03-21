@@ -1,6 +1,8 @@
 package caddyconsul
 
 import (
+	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,19 +129,38 @@ func (w *ConsulWatcher) watchCatalog() {
 	}
 }
 
+// shouldSkipService returns true for services that can never have routing metadata.
+func shouldSkipService(name string) bool {
+	if name == "consul" {
+		return true
+	}
+	if strings.HasSuffix(name, "-sidecar-proxy") {
+		return true
+	}
+	return false
+}
+
 // reconcileServices compares the catalog response with known services and starts/stops
 // per-service health watchers as needed.
 func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	var filtered int
 	currentNames := make(map[string]bool)
 	for name := range catalogServices {
-		// Skip the built-in "consul" service
-		if name == "consul" {
+		if shouldSkipService(name) {
+			filtered++
 			continue
 		}
 		currentNames[name] = true
+	}
+
+	if filtered > 0 {
+		w.logger.Debug("filtered services from catalog",
+			zap.Int("filtered", filtered),
+			zap.Int("remaining", len(currentNames)),
+		)
 	}
 
 	// Start watchers for new services
@@ -197,6 +218,17 @@ func (w *ConsulWatcher) stopServiceWatch(name string) {
 func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 	var lastIndex uint64
 	backoff := time.Second
+	isFirstFetch := true
+
+	// Stagger initial queries with random jitter to avoid thundering herd
+	jitter := time.Duration(rand.Int63n(int64(100 * time.Millisecond)))
+	select {
+	case <-time.After(jitter):
+	case <-w.stopCh:
+		return
+	case <-stopCh:
+		return
+	}
 
 	for {
 		select {
@@ -207,17 +239,14 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 		default:
 		}
 
-		// Acquire semaphore for initial (non-blocking) queries to avoid
-		// overwhelming Consul when many services are discovered at once.
-		// Blocking queries (WaitIndex > 0) are long-polls and don't burst.
-		if lastIndex == 0 {
-			select {
-			case w.healthSem <- struct{}{}:
-			case <-w.stopCh:
-				return
-			case <-stopCh:
-				return
-			}
+		// Acquire semaphore before EVERY health query to respect rate limits.
+		// This covers initial queries, long-poll renewals, and retries.
+		select {
+		case w.healthSem <- struct{}{}:
+		case <-w.stopCh:
+			return
+		case <-stopCh:
+			return
 		}
 
 		passingOnly := w.healthPolicy == HealthPolicyPassing
@@ -229,10 +258,9 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 		entries, meta, err := w.client.Health().Service(name, "", passingOnly, opts)
 
-		// Release semaphore for initial queries
-		if lastIndex == 0 {
-			<-w.healthSem
-		}
+		// Release semaphore immediately after response
+		<-w.healthSem
+
 		if err != nil {
 			w.logger.Error("failed to query service health",
 				zap.String("service", name),
@@ -313,7 +341,44 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 		w.queueChanges([]ServiceChange{
 			{Type: changeType, Service: svc},
 		})
+
+		// After the first successful fetch with instances, check if this service
+		// has any routing configuration. If not, stop watching to save resources.
+		// We only check when instances are present — a service with 0 healthy
+		// instances might still be initializing and have routing config.
+		if isFirstFetch && len(instances) > 0 {
+			isFirstFetch = false
+			if !hasRoutingTags(tags) && !hasRoutingMeta(serviceMeta) {
+				w.logger.Debug("service has no routing config, stopping health watcher",
+					zap.String("service", name),
+				)
+				return
+			}
+		}
 	}
+}
+
+// hasRoutingTags returns true if any tag indicates routing config (urlprefix- or caddy-).
+func hasRoutingTags(tags []string) bool {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, "urlprefix-") {
+			return true
+		}
+		if strings.HasPrefix(tag, "caddy-") {
+			return true
+		}
+	}
+	return false
+}
+
+// hasRoutingMeta returns true if any metadata key indicates routing config.
+func hasRoutingMeta(meta map[string]string) bool {
+	for k := range meta {
+		if strings.HasPrefix(k, "caddy-") {
+			return true
+		}
+	}
+	return false
 }
 
 // isHealthy determines if a service entry is healthy based on the health policy.
