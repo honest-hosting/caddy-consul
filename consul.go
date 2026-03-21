@@ -115,6 +115,15 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		cr.stateMgr = newStateManager(cr.DataDir, cr.logger)
 		cr.stateMgr.Load()
 
+		// Restore HTTP routes immediately from persisted state
+		// so the consul_proxy handler can serve traffic right away.
+		if persistedRoutes := cr.stateMgr.HTTPRoutes(); len(persistedRoutes) > 0 {
+			cr.routeTable.Update(persistedRoutes)
+			cr.logger.Info("restored HTTP routes from persisted state",
+				zap.Int("routes", len(persistedRoutes)),
+			)
+		}
+
 		// Initialize reconciler for TCP routes (with persisted state from prior reload)
 		cr.reconciler = NewReconciler(cr.logger, adminAddr)
 		tcpHashes, tcpNames := cr.stateMgr.TCPState()
@@ -169,6 +178,15 @@ func (cr *ConsulRouter) Start() error {
 	}
 
 	if cr.watcher != nil {
+		// Restore watcher state so it resumes blocking queries
+		// instead of re-fetching all services from scratch.
+		if cr.stateMgr != nil {
+			catalogIdx := cr.stateMgr.CatalogIndex()
+			svcStates := cr.stateMgr.ServiceStates()
+			if catalogIdx > 0 && len(svcStates) > 0 {
+				cr.watcher.RestoreState(catalogIdx, svcStates)
+			}
+		}
 		cr.watcher.Start()
 	}
 	return nil
@@ -314,6 +332,13 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		// Persist TCP state for reload survival
 		hashes, names := cr.reconciler.TCPState()
 		cr.stateMgr.SetTCPState(hashes, names)
+	}
+
+	// Persist full service state for reload survival
+	cr.stateMgr.SetHTTPRoutes(compiled.HTTPRoutes)
+	cr.stateMgr.SetServiceStates(allServices)
+	if cr.watcher != nil {
+		cr.stateMgr.SetCatalogIndex(cr.watcher.catalogIndex)
 	}
 
 	// Save state to disk (survives config reloads)

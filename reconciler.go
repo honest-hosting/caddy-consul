@@ -59,14 +59,49 @@ func NewReconciler(logger *zap.Logger, adminAddr string) *Reconciler {
 // RestoreTCPState restores TCP reconciler state from a previous reload cycle.
 // This prevents the reconciler from re-applying identical TCP servers and
 // triggering another unnecessary config reload.
+//
+// After restoring, it verifies that the servers actually exist in the live
+// Caddy config. If any are missing (e.g., after a reload wiped them), the
+// hashes are cleared so the reconciler will re-create them.
 func (r *Reconciler) RestoreTCPState(hashes map[string]string, names []string) {
-	if len(hashes) > 0 {
-		r.lastTCPServerHashes = hashes
-	}
 	if len(names) > 0 {
 		r.ownedTCPServerNames = make(map[string]bool, len(names))
 		for _, name := range names {
 			r.ownedTCPServerNames[name] = true
+		}
+	}
+	if len(hashes) > 0 {
+		r.lastTCPServerHashes = hashes
+	}
+}
+
+// VerifyTCPServersExist checks that persisted TCP servers actually exist in
+// the live Caddy config. If any are missing, clears the hash state so they
+// get re-created on the next reconciliation.
+func (r *Reconciler) VerifyTCPServersExist() {
+	if len(r.ownedTCPServerNames) == 0 {
+		return
+	}
+
+	for name := range r.ownedTCPServerNames {
+		path := fmt.Sprintf("/config/apps/layer4/servers/%s", name)
+		resp, err := r.adminGet(path)
+		if err != nil {
+			// Admin API not ready yet — clear hashes to force re-apply
+			r.lastTCPServerHashes = nil
+			r.logger.Debug("admin API not ready, will re-apply TCP servers")
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+
+		// Check for 404, null body, or non-200 status
+		if resp.StatusCode != http.StatusOK || string(body) == "null" {
+			r.logger.Info("persisted TCP server not found in live config, will re-create",
+				zap.String("server", name),
+			)
+			r.lastTCPServerHashes = nil
+			return
 		}
 	}
 }
@@ -147,6 +182,9 @@ func (r *Reconciler) ApplyTCP(compiled *CompiledConfig) error {
 	if err := r.waitForAdminAPI(); err != nil {
 		return fmt.Errorf("admin API unavailable: %w", err)
 	}
+
+	// Verify persisted TCP servers still exist in live config
+	r.VerifyTCPServersExist()
 
 	start := time.Now()
 

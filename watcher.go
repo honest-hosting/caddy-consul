@@ -66,8 +66,46 @@ func NewConsulWatcher(
 	}
 }
 
+// RestoreState restores watcher state from a previous run. This allows the
+// watcher to resume blocking queries from where it left off instead of
+// re-fetching all services from scratch, avoiding Consul 429 rate limits.
+func (w *ConsulWatcher) RestoreState(catalogIndex uint64, services map[string]*persistedServiceState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.catalogIndex = catalogIndex
+
+	for name, pss := range services {
+		w.services[name] = &ServiceState{
+			Name:      pss.Name,
+			Tags:      pss.Tags,
+			Meta:      pss.Meta,
+			Instances: pss.Instances,
+			LastIndex: pss.LastIndex,
+		}
+	}
+
+	if len(services) > 0 {
+		w.logger.Info("restored watcher state from disk",
+			zap.Uint64("catalog_index", catalogIndex),
+			zap.Int("services", len(services)),
+		)
+	}
+}
+
 // Start begins watching Consul for service changes. Non-blocking.
+// If state was restored via RestoreState, the watcher resumes with blocking
+// queries (no burst of initial fetches).
 func (w *ConsulWatcher) Start() {
+	// Start health watchers for any restored services
+	w.mu.RLock()
+	for name, svc := range w.services {
+		if svc.LastIndex > 0 {
+			w.startServiceWatch(name)
+		}
+	}
+	w.mu.RUnlock()
+
 	go w.watchCatalog()
 }
 
@@ -233,7 +271,14 @@ func (w *ConsulWatcher) stopServiceWatch(name string) {
 
 // watchServiceHealth watches health endpoint for a specific service using blocking queries.
 func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
+	// Resume from persisted index if available (skips initial fetch burst)
+	w.mu.RLock()
 	var lastIndex uint64
+	if svc, ok := w.services[name]; ok {
+		lastIndex = svc.LastIndex
+	}
+	w.mu.RUnlock()
+
 	backoff := time.Second
 
 	// Stagger initial queries with random jitter to avoid thundering herd

@@ -13,10 +13,28 @@ import (
 
 const stateFileName = "state.json"
 
-// persistedState holds checksums that survive Caddy config reloads.
-// Written to disk after each reconciliation, read on Provision.
+// persistedServiceState holds the minimal state needed to resume watching a service
+// without re-fetching from Consul.
+type persistedServiceState struct {
+	Name      string            `json:"name"`
+	Tags      []string          `json:"tags,omitempty"`
+	Meta      map[string]string `json:"meta,omitempty"`
+	Instances []ServiceInstance `json:"instances,omitempty"`
+	LastIndex uint64            `json:"last_index"`
+}
+
+// persistedState holds all state that must survive Caddy config reloads.
+// This prevents the watcher from re-querying Consul on reload, avoiding 429s.
 type persistedState struct {
-	HTTPRouteHash   string            `json:"http_route_hash,omitempty"`
+	// Catalog state
+	CatalogIndex uint64                           `json:"catalog_index"`
+	Services     map[string]*persistedServiceState `json:"services,omitempty"`
+
+	// Compiled route state
+	HTTPRoutes    []CompiledHTTPRoute `json:"http_routes,omitempty"`
+	HTTPRouteHash string              `json:"http_route_hash,omitempty"`
+
+	// TCP reconciler state
 	TCPServerHashes map[string]string `json:"tcp_server_hashes,omitempty"`
 	TCPServerNames  []string          `json:"tcp_server_names,omitempty"`
 }
@@ -60,11 +78,15 @@ func (sm *stateManager) Load() {
 			zap.Error(err),
 		)
 		sm.state = persistedState{}
+		return
 	}
 
-	sm.logger.Debug("loaded persisted state",
+	sm.logger.Info("loaded persisted state",
 		zap.String("http_hash", sm.state.HTTPRouteHash),
+		zap.Int("services", len(sm.state.Services)),
+		zap.Int("http_routes", len(sm.state.HTTPRoutes)),
 		zap.Int("tcp_servers", len(sm.state.TCPServerNames)),
+		zap.Uint64("catalog_index", sm.state.CatalogIndex),
 	)
 }
 
@@ -109,6 +131,20 @@ func (sm *stateManager) SetHTTPRouteHash(hash string) {
 	sm.state.HTTPRouteHash = hash
 }
 
+// HTTPRoutes returns the persisted compiled HTTP routes.
+func (sm *stateManager) HTTPRoutes() []CompiledHTTPRoute {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.HTTPRoutes
+}
+
+// SetHTTPRoutes updates the persisted HTTP routes.
+func (sm *stateManager) SetHTTPRoutes(routes []CompiledHTTPRoute) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.HTTPRoutes = routes
+}
+
 // TCPState returns the persisted TCP server hashes and names.
 func (sm *stateManager) TCPState() (map[string]string, []string) {
 	sm.mu.Lock()
@@ -122,6 +158,44 @@ func (sm *stateManager) SetTCPState(hashes map[string]string, names []string) {
 	defer sm.mu.Unlock()
 	sm.state.TCPServerHashes = hashes
 	sm.state.TCPServerNames = names
+}
+
+// CatalogIndex returns the persisted catalog watch index.
+func (sm *stateManager) CatalogIndex() uint64 {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.CatalogIndex
+}
+
+// SetCatalogIndex updates the persisted catalog index.
+func (sm *stateManager) SetCatalogIndex(idx uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.CatalogIndex = idx
+}
+
+// ServiceStates returns the persisted service states.
+func (sm *stateManager) ServiceStates() map[string]*persistedServiceState {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.Services
+}
+
+// SetServiceStates updates the persisted service states.
+func (sm *stateManager) SetServiceStates(services map[string]*ServiceState) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	sm.state.Services = make(map[string]*persistedServiceState, len(services))
+	for name, svc := range services {
+		sm.state.Services[name] = &persistedServiceState{
+			Name:      svc.Name,
+			Tags:      svc.Tags,
+			Meta:      svc.Meta,
+			Instances: svc.Instances,
+			LastIndex: svc.LastIndex,
+		}
+	}
 }
 
 // hashRoutes computes a SHA256 hash of compiled HTTP routes for change detection.
