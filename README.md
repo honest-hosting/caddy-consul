@@ -122,6 +122,51 @@ Minimal configuration:
 }
 ```
 
+### Complete Caddy JSON Example
+
+The JSON field names match the Caddyfile directive names. The consul config lives under `apps.consul`:
+
+```json
+{
+  "admin": {
+    "listen": "localhost:2019"
+  },
+  "apps": {
+    "consul": {
+      "address": "127.0.0.1:8500",
+      "token": "",
+      "scheme": "https",
+      "datacenter": "dc1",
+      "tls_ca": "/etc/consul/ca.pem",
+      "tls_cert": "/etc/consul/cert.pem",
+      "tls_key": "/etc/consul/key.pem",
+      "insecure_skip_verify": false,
+      "service_proxy_enable": true,
+      "health_policy": "passing",
+      "conflict_policy": "reject",
+      "connect_proxy_enable": false,
+      "connect_service_name": "my-ingress",
+      "connect_auto_register": true,
+      "max_concurrent_checks": 5,
+      "debounce_duration": "500ms",
+      "metrics": "/metrics/consul"
+    },
+    "http": {
+      "servers": {
+        "srv0": {
+          "listen": [":443"],
+          "routes": []
+        },
+        "srv1": {
+          "listen": [":80"],
+          "routes": []
+        }
+      }
+    }
+  }
+}
+```
+
 ## Consul Service Configuration
 
 Services declare routing instructions via Consul service metadata or tags.

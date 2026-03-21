@@ -17,16 +17,16 @@ type ConsulRouter struct {
 	logger *zap.Logger
 
 	// Consul connection
-	ConsulAddr   string `json:"consul_addr,omitempty"`
-	ConsulToken  string `json:"consul_token,omitempty"`
-	ConsulScheme string `json:"consul_scheme,omitempty"`
-	ConsulDC     string `json:"consul_dc,omitempty"`
+	ConsulAddr   string `json:"address,omitempty"`
+	ConsulToken  string `json:"token,omitempty"`
+	ConsulScheme string `json:"scheme,omitempty"`
+	ConsulDC     string `json:"datacenter,omitempty"`
 
 	// TLS to Consul
-	ConsulTLSCA             string `json:"consul_tls_ca,omitempty"`
-	ConsulTLSCert           string `json:"consul_tls_cert,omitempty"`
-	ConsulTLSKey            string `json:"consul_tls_key,omitempty"`
-	ConsulTLSSkipVerify     bool   `json:"consul_tls_skip_verify,omitempty"`
+	ConsulTLSCA             string `json:"tls_ca,omitempty"`
+	ConsulTLSCert           string `json:"tls_cert,omitempty"`
+	ConsulTLSKey            string `json:"tls_key,omitempty"`
+	ConsulTLSSkipVerify     bool   `json:"insecure_skip_verify,omitempty"`
 
 	// Behavior
 	ServiceProxyEnable *bool  `json:"service_proxy_enable,omitempty"`
@@ -72,8 +72,8 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 	adminAddr := caddy.DefaultAdminListen
 
 	cr.logger.Info("caddy-consul provisioning",
-		zap.String("consul_addr", cr.ConsulAddr),
-		zap.String("consul_scheme", cr.ConsulScheme),
+		zap.String("address", cr.ConsulAddr),
+		zap.String("scheme", cr.ConsulScheme),
 		zap.String("admin_addr", adminAddr),
 		zap.Bool("service_proxy_enable", boolVal(cr.ServiceProxyEnable)),
 		zap.String("health_policy", cr.HealthPolicy),
