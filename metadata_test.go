@@ -286,7 +286,7 @@ func TestParseFabioTag_Basic(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.tag, func(t *testing.T) {
-			result := parseFabioTag(tt.tag)
+			result, _ := parseFabioTag(tt.tag)
 			if tt.expected == nil {
 				assert.Nil(t, result)
 			} else {
@@ -302,7 +302,7 @@ func TestParseFabioTag_Basic(t *testing.T) {
 }
 
 func TestParseFabioTag_Redirect(t *testing.T) {
-	rd := parseFabioTag("urlprefix-www.habitat.dev/ redirect=301,https://www.honesthosting.io$path")
+	rd, _ := parseFabioTag("urlprefix-www.habitat.dev/ redirect=301,https://www.honesthosting.io$path")
 	require.NotNil(t, rd)
 	assert.Equal(t, "www.habitat.dev", rd.Host)
 	assert.Equal(t, "/", rd.Path)
@@ -311,23 +311,32 @@ func TestParseFabioTag_Redirect(t *testing.T) {
 	assert.True(t, rd.IsRedirect())
 }
 
-func TestParseFabioTag_RedirectWithPort80(t *testing.T) {
-	rd := parseFabioTag("urlprefix-www.habitat.dev:80/ redirect=301,https://www.honesthosting.io$path")
-	require.NotNil(t, rd)
-	assert.Equal(t, "www.habitat.dev", rd.Host) // :80 stripped
-	assert.Equal(t, 301, rd.RedirectCode)
-	assert.Equal(t, "https://www.honesthosting.io{http.request.uri}", rd.RedirectURL)
+func TestParseFabioTag_RedirectWithPort80_Dropped(t *testing.T) {
+	// :80 redirect tags are HTTP→HTTPS redirects handled by Caddy automatically.
+	// They should be dropped to prevent redirect loops.
+	rd, portRedir := parseFabioTag("urlprefix-www.habitat.dev:80/ redirect=301,https://www.honesthosting.io$path")
+	assert.True(t, portRedir, "should be flagged as port redirect")
+	assert.Nil(t, rd, ":80 redirect should be dropped (Caddy handles HTTP→HTTPS)")
 }
 
-func TestParseFabioTag_RedirectWithPort443(t *testing.T) {
-	rd := parseFabioTag("urlprefix-secure.example.com:443/ redirect=302,https://other.com$path")
+func TestParseFabioTag_RedirectWithPort443_Dropped(t *testing.T) {
+	rd, portRedir := parseFabioTag("urlprefix-secure.example.com:443/ redirect=302,https://other.com$path")
+	assert.True(t, portRedir)
+	assert.Nil(t, rd, ":443 redirect should be dropped")
+}
+
+func TestParseFabioTag_RedirectWithoutPort_Kept(t *testing.T) {
+	// Redirect WITHOUT :port qualifier is a real cross-domain redirect — keep it
+	rd, portRedir := parseFabioTag("urlprefix-old.example.com/ redirect=301,https://new.example.com$path")
+	assert.False(t, portRedir, "no port qualifier — should not be flagged")
 	require.NotNil(t, rd)
-	assert.Equal(t, "secure.example.com", rd.Host) // :443 stripped
-	assert.Equal(t, 302, rd.RedirectCode)
+	assert.Equal(t, "old.example.com", rd.Host)
+	assert.Equal(t, 301, rd.RedirectCode)
+	assert.Equal(t, "https://new.example.com{http.request.uri}", rd.RedirectURL)
 }
 
 func TestParseFabioTag_PortStripNonStandard(t *testing.T) {
-	rd := parseFabioTag("urlprefix-app.example.com:8080/")
+	rd, _ := parseFabioTag("urlprefix-app.example.com:8080/")
 	require.NotNil(t, rd)
 	assert.Equal(t, "app.example.com:8080", rd.Host) // non-standard port kept
 }

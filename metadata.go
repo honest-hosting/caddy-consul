@@ -31,8 +31,15 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 	hasNonIndexed := hasNonIndexedMeta(meta)
 
 	// Check for Fabio urlprefix- tags
-	fabioRoutes := parseFabioTags(svc.Tags)
+	fabioRoutes, skippedPortRedirects := parseFabioTags(svc.Tags)
 	hasFabio := len(fabioRoutes) > 0
+
+	if skippedPortRedirects > 0 {
+		logger.Warn("skipped port-qualified redirect tags (Caddy handles HTTP→HTTPS automatically)",
+			zap.String("service", svc.Name),
+			zap.Int("skipped", skippedPortRedirects),
+		)
+	}
 
 	if hasIndexed && hasNonIndexed {
 		logger.Warn("service has both indexed (caddy-route-N-*) and non-indexed (caddy-*) metadata; using indexed keys only",
@@ -297,29 +304,33 @@ func parseIndexedMeta(meta map[string]string) []RouteDefinition {
 //	urlprefix-host.example.com/
 //	urlprefix-host.example.com/path strip=/path
 //	urlprefix-:5432 proto=tcp
-func parseFabioTags(tags []string) []RouteDefinition {
-	var routes []RouteDefinition
-
+func parseFabioTags(tags []string) (routes []RouteDefinition, skippedPortRedirects int) {
 	for _, tag := range tags {
 		if !strings.HasPrefix(tag, "urlprefix-") {
 			continue
 		}
 
-		rd := parseFabioTag(tag)
+		rd, portRedirect := parseFabioTag(tag)
+		if portRedirect {
+			skippedPortRedirects++
+			continue
+		}
 		if rd != nil {
 			routes = append(routes, *rd)
 		}
 	}
 
-	return routes
+	return routes, skippedPortRedirects
 }
 
 // parseFabioTag parses a single Fabio urlprefix- tag.
-func parseFabioTag(tag string) *RouteDefinition {
+// Returns the RouteDefinition and a flag indicating if this was a port-qualified
+// redirect that should be skipped (Caddy handles HTTP→HTTPS automatically).
+func parseFabioTag(tag string) (rd *RouteDefinition, portRedirect bool) {
 	// Remove "urlprefix-" prefix
 	value := strings.TrimPrefix(tag, "urlprefix-")
 	if value == "" {
-		return nil
+		return nil, false
 	}
 
 	// Split into URL part and modifiers
@@ -335,7 +346,7 @@ func parseFabioTag(tag string) *RouteDefinition {
 		}
 	}
 
-	rd := &RouteDefinition{
+	rd = &RouteDefinition{
 		Protocol: ProtocolHTTP,
 		Enabled:  true,
 	}
@@ -376,27 +387,35 @@ func parseFabioTag(tag string) *RouteDefinition {
 			portStr := strings.TrimPrefix(urlPart, ":")
 			port, err := strconv.Atoi(portStr)
 			if err != nil || port <= 0 {
-				return nil
+				return nil, false
 			}
 			rd.Port = port
 		} else {
-			return nil
+			return nil, false
 		}
 	} else {
 		// HTTP format: host/path or host (may include :port)
+		rawHost := ""
 		if idx := strings.IndexByte(urlPart, '/'); idx >= 0 {
-			rd.Host = urlPart[:idx]
+			rawHost = urlPart[:idx]
 			rd.Path = urlPart[idx:]
 		} else {
-			rd.Host = urlPart
+			rawHost = urlPart
 			rd.Path = "/"
 		}
-		// Strip standard ports — browsers don't send them in the Host header,
-		// so Caddy's host matcher won't match "host:80" or "host:443".
-		rd.Host = stripStandardPort(rd.Host)
+
+		// Detect :80/:443 redirect tags — these are HTTP→HTTPS redirects
+		// that Caddy handles automatically. Since consul_proxy only runs on
+		// the HTTPS server, these would cause redirect loops. Drop them.
+		hadStandardPort := strings.HasSuffix(rawHost, ":80") || strings.HasSuffix(rawHost, ":443")
+		rd.Host = stripStandardPort(rawHost)
+
+		if hadStandardPort && rd.RedirectCode > 0 {
+			return nil, true
+		}
 	}
 
-	return rd
+	return rd, false
 }
 
 // stripStandardPort removes :80 or :443 suffixes from a hostname.
