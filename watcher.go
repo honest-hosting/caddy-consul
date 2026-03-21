@@ -164,15 +164,32 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 	}
 
 	// Start watchers for new services
+	var skippedNoRouting int
 	for name := range currentNames {
 		if _, exists := w.services[name]; !exists {
+			catalogTags := catalogServices[name]
+
+			// Skip services with no routing config visible in catalog tags.
+			// Services using metadata (not tags) won't have routing info in
+			// the catalog, so we only skip if tags are present but none are
+			// routing-related.
+			if len(catalogTags) > 0 && !hasRoutingTags(catalogTags) {
+				skippedNoRouting++
+				continue
+			}
+
 			w.logger.Debug("new service discovered", zap.String("service", name))
 			w.services[name] = &ServiceState{
 				Name: name,
-				Tags: catalogServices[name],
+				Tags: catalogTags,
 			}
 			w.startServiceWatch(name)
 		}
+	}
+	if skippedNoRouting > 0 {
+		w.logger.Debug("skipped services with no routing tags in catalog",
+			zap.Int("skipped", skippedNoRouting),
+		)
 	}
 
 	// Stop watchers for removed services
@@ -287,8 +304,8 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 		// Convert to our types
 		var instances []ServiceInstance
-		var tags []string
 		serviceMeta := make(map[string]string)
+		tagSet := make(map[string]bool)
 
 		for _, entry := range entries {
 			healthy := w.isHealthy(entry)
@@ -300,7 +317,7 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 				Tags:    entry.Service.Tags,
 				Meta:    entry.Service.Meta,
 				Healthy: healthy,
-				Weight: 1,
+				Weight:  1,
 			}
 
 			if entry.Service.Weights.Passing > 0 {
@@ -309,15 +326,22 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 			instances = append(instances, inst)
 
-			// Collect tags and meta from first entry as canonical
-			if len(tags) == 0 {
-				tags = entry.Service.Tags
+			// Collect tags from ALL instances (union)
+			for _, tag := range entry.Service.Tags {
+				tagSet[tag] = true
 			}
+			// Collect meta from all instances (first-seen wins for duplicates)
 			for k, v := range entry.Service.Meta {
 				if _, exists := serviceMeta[k]; !exists {
 					serviceMeta[k] = v
 				}
 			}
+		}
+
+		// Convert tag set to slice
+		var tags []string
+		for tag := range tagSet {
+			tags = append(tags, tag)
 		}
 
 		w.mu.Lock()
@@ -351,6 +375,8 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 			if !hasRoutingTags(tags) && !hasRoutingMeta(serviceMeta) {
 				w.logger.Debug("service has no routing config, stopping health watcher",
 					zap.String("service", name),
+					zap.Int("instances", len(instances)),
+					zap.Int("tags", len(tags)),
 				)
 				return
 			}
