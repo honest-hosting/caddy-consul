@@ -21,8 +21,9 @@ func TestIntegration_TCP_FabioTag_PortRouting(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = deregisterService(client, "tcp-pg") }()
 
-	// Wait for caddy-consul to discover and create the L4 listener
-	time.Sleep(5 * time.Second)
+	// Allow time for: catalog discovery → health fetch → debounce → compile →
+	// state save → admin API PUT → Caddy reload → L4 server ready
+	time.Sleep(10 * time.Second)
 
 	// Try to connect to the TCP port through Caddy
 	err = waitForTCP(caddyTCPPostgres, 10*time.Second)
@@ -43,7 +44,10 @@ func TestIntegration_TCP_MetadataRouting(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = deregisterService(client, "tcp-mysql") }()
 
-	time.Sleep(5 * time.Second)
+	// Allow extra time: the previous TCP test (FabioTag) may have triggered
+	// a Caddy reload via L4 admin API, which restarts caddy-consul. This test's
+	// service needs to be re-discovered after the reload completes.
+	time.Sleep(15 * time.Second)
 
 	err = waitForTCP(caddyTCPMySQL, 10*time.Second)
 	require.NoError(t, err, "TCP port %s should be reachable through Caddy", caddyTCPMySQL)
@@ -64,8 +68,9 @@ func TestIntegration_TCP_ServiceDeregister(t *testing.T) {
 	err = registerTCPService(client, "tcp-temp", "echo-tcp", 9000, deregPort)
 	require.NoError(t, err)
 
-	// Verify the L4 server was created in Caddy's config
-	time.Sleep(5 * time.Second)
+	// Allow time for: catalog discovery → health fetch → debounce → compile →
+	// state save → admin API PUT → Caddy reload → L4 server ready
+	time.Sleep(10 * time.Second)
 
 	serverName := fmt.Sprintf("consul_tcp_%d", deregPort)
 	server, err := getCaddyTCPServer(serverName)

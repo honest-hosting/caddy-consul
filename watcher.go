@@ -526,12 +526,15 @@ func (w *ConsulWatcher) flushChanges() {
 	)
 
 	// Deep-copy snapshot so the onChange callback gets immutable data.
-	// Without this, watcher goroutines could mutate ServiceState fields
-	// (Instances, Tags, Meta) concurrently with the callback reading them.
+	// Only include services that have received at least one health response
+	// (LastIndex > 0). Services just discovered from the catalog but not yet
+	// health-checked would have 0 instances and produce empty routes.
 	w.mu.RLock()
 	snapshot := make(map[string]*ServiceState, len(w.services))
 	for k, v := range w.services {
-		snapshot[k] = v.clone()
+		if v.LastIndex > 0 {
+			snapshot[k] = v.clone()
+		}
 	}
 	w.mu.RUnlock()
 

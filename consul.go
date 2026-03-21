@@ -1,6 +1,8 @@
 package caddyconsul
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sync"
 
@@ -318,8 +320,37 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		cr.logger.Debug("HTTP routes unchanged, skipping update")
 	}
 
-	// Reconcile TCP routes via admin API (infrequent, acceptable reload)
+	// Persist full state to disk BEFORE any admin API calls.
+	// The TCP admin API call may trigger a Caddy reload that kills us
+	// before we can save — so save first.
+	cr.stateMgr.SetHTTPRoutes(compiled.HTTPRoutes)
+	cr.stateMgr.SetServiceStates(allServices)
+	if cr.watcher != nil {
+		cr.stateMgr.SetCatalogIndex(cr.watcher.catalogIndex)
+	}
+
+	// Pre-compute TCP hashes for persistence before applying
 	_, existingTCPNames := cr.stateMgr.TCPState()
+	if len(compiled.TCPRoutes) > 0 || len(existingTCPNames) > 0 {
+		grouped := GroupTCPRoutesByPort(compiled.TCPRoutes)
+		desiredHashes := make(map[string]string)
+		desiredNames := make([]string, 0)
+		for port, portRoutes := range grouped {
+			serverJSON, err := BuildTCPServerJSON(port, portRoutes)
+			if err == nil {
+				name := fmt.Sprintf("consul_tcp_%d", port)
+				h := sha256.Sum256(serverJSON)
+				desiredHashes[name] = hex.EncodeToString(h[:])
+				desiredNames = append(desiredNames, name)
+			}
+		}
+		cr.stateMgr.SetTCPState(desiredHashes, desiredNames)
+	}
+
+	// Save state to disk (must happen before admin API calls)
+	cr.stateMgr.Save()
+
+	// NOW apply TCP routes via admin API (may trigger reload — state is safe on disk)
 	if len(compiled.TCPRoutes) > 0 || len(existingTCPNames) > 0 {
 		tcpConfig := &CompiledConfig{
 			TCPRoutes: compiled.TCPRoutes,
@@ -329,20 +360,7 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 				zap.Error(err),
 			)
 		}
-		// Persist TCP state for reload survival
-		hashes, names := cr.reconciler.TCPState()
-		cr.stateMgr.SetTCPState(hashes, names)
 	}
-
-	// Persist full service state for reload survival
-	cr.stateMgr.SetHTTPRoutes(compiled.HTTPRoutes)
-	cr.stateMgr.SetServiceStates(allServices)
-	if cr.watcher != nil {
-		cr.stateMgr.SetCatalogIndex(cr.watcher.catalogIndex)
-	}
-
-	// Save state to disk (survives config reloads)
-	cr.stateMgr.Save()
 }
 
 // Interface guards
