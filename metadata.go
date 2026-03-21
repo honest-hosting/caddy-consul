@@ -20,27 +20,6 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 		return nil
 	}
 
-	// Build upstreams from healthy instances
-	var upstreams []Upstream
-	for _, inst := range svc.Instances {
-		if !inst.Healthy {
-			continue
-		}
-		addr := inst.Address
-		if addr == "" {
-			continue
-		}
-		upstreams = append(upstreams, Upstream{
-			Address: fmt.Sprintf("%s:%d", addr, inst.Port),
-			Weight:  inst.Weight,
-			Healthy: true,
-		})
-	}
-
-	if len(upstreams) == 0 {
-		return nil
-	}
-
 	// Merge metadata from all instances (first instance wins for conflicts)
 	meta := mergeInstanceMeta(svc)
 
@@ -80,13 +59,38 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 		return nil
 	}
 
+	// Build upstreams from healthy instances that have routing config.
+	// A single Consul service name may have multiple instance types (frontend,
+	// cache, database) — only instances with urlprefix- tags or caddy-* metadata
+	// should be used as upstreams.
+	var upstreams []Upstream
+	for _, inst := range svc.Instances {
+		if !inst.Healthy {
+			continue
+		}
+		addr := inst.Address
+		if addr == "" {
+			continue
+		}
+		if !instanceHasRoutingConfig(inst, hasIndexed || hasNonIndexed) {
+			continue
+		}
+		upstreams = append(upstreams, Upstream{
+			Address: fmt.Sprintf("%s:%d", addr, inst.Port),
+			Weight:  inst.Weight,
+			Healthy: true,
+		})
+	}
+
+	if len(upstreams) == 0 {
+		return nil
+	}
+
 	// Apply common fields to all routes
 	for i := range routes {
 		routes[i].ServiceName = svc.Name
 		routes[i].Upstreams = upstreams
-
 		routes[i].UpstreamMode = UpstreamDirect
-
 	}
 
 	// Filter out disabled routes
@@ -98,6 +102,25 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 	}
 
 	return enabled
+}
+
+// instanceHasRoutingConfig checks if a specific service instance has routing
+// configuration. For Fabio-based routing, checks for urlprefix- tags. For
+// metadata-based routing, all instances of the service are considered valid
+// (metadata is merged across instances).
+func instanceHasRoutingConfig(inst ServiceInstance, usesMetadata bool) bool {
+	if usesMetadata {
+		// Metadata-based routing: all instances are valid upstreams since
+		// metadata is defined at the service level, not per-instance.
+		return true
+	}
+	// Fabio tag-based routing: only instances with urlprefix- tags
+	for _, tag := range inst.Tags {
+		if strings.HasPrefix(tag, "urlprefix-") {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeInstanceMeta collects metadata from all instances. Service-level meta takes

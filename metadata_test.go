@@ -131,7 +131,10 @@ func TestParseServiceRoutes_FabioTags(t *testing.T) {
 			"urlprefix-app.example.com/api strip=/api",
 		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{
+				"urlprefix-app.example.com/",
+				"urlprefix-app.example.com/api strip=/api",
+			}},
 		},
 	}
 
@@ -152,7 +155,7 @@ func TestParseServiceRoutes_FabioTCP(t *testing.T) {
 		Name: "postgres",
 		Tags: []string{"urlprefix-:5432 proto=tcp"},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 5432, Healthy: true},
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, Tags: []string{"urlprefix-:5432 proto=tcp"}},
 		},
 	}
 
@@ -168,7 +171,7 @@ func TestParseServiceRoutes_FabioHTTPS(t *testing.T) {
 		Name: "secure",
 		Tags: []string{"urlprefix-secure.example.com/ proto=https"},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 443, Healthy: true},
+			{Address: "10.0.0.1", Port: 443, Healthy: true, Tags: []string{"urlprefix-secure.example.com/ proto=https"}},
 		},
 	}
 

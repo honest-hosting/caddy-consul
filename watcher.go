@@ -255,14 +255,18 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 		default:
 		}
 
-		// Acquire semaphore before EVERY health query to respect rate limits.
-		// This covers initial queries, long-poll renewals, and retries.
-		select {
-		case w.healthSem <- struct{}{}:
-		case <-w.stopCh:
-			return
-		case <-stopCh:
-			return
+		// Acquire semaphore for non-blocking queries (initial fetches and retries)
+		// to avoid overwhelming Consul. Blocking queries (WaitIndex > 0) are
+		// long-polls that Consul handles efficiently — they don't need throttling.
+		isBlocking := lastIndex > 0
+		if !isBlocking {
+			select {
+			case w.healthSem <- struct{}{}:
+			case <-w.stopCh:
+				return
+			case <-stopCh:
+				return
+			}
 		}
 
 		passingOnly := w.healthPolicy == HealthPolicyPassing
@@ -274,8 +278,10 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 		entries, meta, err := w.client.Health().Service(name, "", passingOnly, opts)
 
-		// Release semaphore immediately after response
-		<-w.healthSem
+		// Release semaphore for non-blocking queries
+		if !isBlocking {
+			<-w.healthSem
+		}
 
 		if err != nil {
 			w.logger.Error("failed to query service health",
