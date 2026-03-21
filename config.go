@@ -3,11 +3,13 @@ package caddyconsul
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
@@ -68,6 +70,7 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    max_concurrent_checks 5
 //	    debounce 500ms
 //	    caddy_admin_api localhost:2019
+//	    data_dir /var/lib/caddy-consul
 //	    metrics /metrics/consul
 //	}
 func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -212,6 +215,12 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.CaddyAdminAPI = d.Val()
 
+		case "data_dir":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.DataDir = d.Val()
+
 		case "metrics":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -276,6 +285,9 @@ func (cr *ConsulRouter) applyDefaults() {
 	}
 	if cr.CaddyAdminAPI == "" {
 		cr.CaddyAdminAPI = DefaultCaddyAdminAPI
+	}
+	if cr.DataDir == "" {
+		cr.DataDir = filepath.Join(caddy.AppDataDir(), "caddy-consul")
 	}
 }
 

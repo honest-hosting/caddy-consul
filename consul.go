@@ -44,18 +44,18 @@ type ConsulRouter struct {
 	// Caddy admin API
 	CaddyAdminAPI string `json:"caddy_admin_api,omitempty"`
 
+	// Data directory for runtime state (persisted across reloads)
+	DataDir string `json:"data_dir,omitempty"`
+
 	// Metrics
 	Metrics string `json:"metrics,omitempty"`
-
-	// TCP state persisted across config reloads (prevents cascading L4 reloads)
-	LastTCPServerHashes map[string]string `json:"last_tcp_server_hashes,omitempty"`
-	OwnedTCPServerNames []string         `json:"owned_tcp_server_names,omitempty"`
 
 	// Internal (not serialized)
 	watcher             *ConsulWatcher       `json:"-"`
 	compiler            *RouteCompiler       `json:"-"`
 	reconciler          *Reconciler          `json:"-"`
 	routeTable          *RouteTable          `json:"-"`
+	stateMgr            *stateManager        `json:"-"`
 	sidecarResolver     *SidecarResolver     `json:"-"`
 	registrar           *ServiceRegistrar    `json:"-"`
 	sidecarWarnOnce     *sync.Once           `json:"-"`
@@ -111,9 +111,14 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		cr.routeTable = NewRouteTable()
 		globalRouteTable.Store(cr.routeTable)
 
+		// Load persisted state from disk (survives config reloads)
+		cr.stateMgr = newStateManager(cr.DataDir, cr.logger)
+		cr.stateMgr.Load()
+
 		// Initialize reconciler for TCP routes (with persisted state from prior reload)
 		cr.reconciler = NewReconciler(cr.logger, adminAddr)
-		cr.reconciler.RestoreTCPState(cr.LastTCPServerHashes, cr.OwnedTCPServerNames)
+		tcpHashes, tcpNames := cr.stateMgr.TCPState()
+		cr.reconciler.RestoreTCPState(tcpHashes, tcpNames)
 
 		cr.watcher = NewConsulWatcher(
 			consulClient,
@@ -284,13 +289,20 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 	}
 
 	// Update HTTP routes in-memory (no admin API, no config reload)
-	cr.routeTable.Update(compiled.HTTPRoutes)
-	cr.logger.Info("HTTP routes updated in-memory",
-		zap.Int("routes", len(compiled.HTTPRoutes)),
-	)
+	newHTTPHash := hashRoutes(compiled.HTTPRoutes)
+	if newHTTPHash != cr.stateMgr.HTTPRouteHash() {
+		cr.routeTable.Update(compiled.HTTPRoutes)
+		cr.stateMgr.SetHTTPRouteHash(newHTTPHash)
+		cr.logger.Info("HTTP routes updated in-memory",
+			zap.Int("routes", len(compiled.HTTPRoutes)),
+		)
+	} else {
+		cr.logger.Debug("HTTP routes unchanged, skipping update")
+	}
 
 	// Reconcile TCP routes via admin API (infrequent, acceptable reload)
-	if len(compiled.TCPRoutes) > 0 || len(cr.OwnedTCPServerNames) > 0 {
+	_, existingTCPNames := cr.stateMgr.TCPState()
+	if len(compiled.TCPRoutes) > 0 || len(existingTCPNames) > 0 {
 		tcpConfig := &CompiledConfig{
 			TCPRoutes: compiled.TCPRoutes,
 		}
@@ -300,8 +312,12 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 			)
 		}
 		// Persist TCP state for reload survival
-		cr.LastTCPServerHashes, cr.OwnedTCPServerNames = cr.reconciler.TCPState()
+		hashes, names := cr.reconciler.TCPState()
+		cr.stateMgr.SetTCPState(hashes, names)
 	}
+
+	// Save state to disk (survives config reloads)
+	cr.stateMgr.Save()
 }
 
 // Interface guards

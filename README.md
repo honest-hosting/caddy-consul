@@ -47,7 +47,8 @@ xcaddy build \
 | `connect_auto_register` | Auto-register Caddy in Consul on startup | `true` |
 | `max_concurrent_checks` | Max concurrent Consul health check queries | `5` |
 | `debounce` | Debounce window for rapid Consul changes | `500ms` |
-| `caddy_admin_api` | Caddy admin API address for route reconciliation | `localhost:2019` |
+| `caddy_admin_api` | Caddy admin API address for TCP route reconciliation | `localhost:2019` |
+| `data_dir` | Directory for runtime state (persisted across reloads) | `$XDG_DATA_HOME/caddy/caddy-consul` |
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
 
 Environment variables `CONSUL_HTTP_ADDR`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_SSL`, `CONSUL_CACERT`, `CONSUL_CLIENT_CERT`, and `CONSUL_CLIENT_KEY` are supported as fallbacks when the corresponding option is not set.
@@ -163,6 +164,7 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "max_concurrent_checks": 5,
       "debounce_duration": "500ms",
       "caddy_admin_api": "localhost:2019",
+      "data_dir": "/var/lib/caddy-consul",
       "metrics": "/metrics/consul"
     },
     "http": {
