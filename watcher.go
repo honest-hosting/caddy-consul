@@ -235,7 +235,6 @@ func (w *ConsulWatcher) stopServiceWatch(name string) {
 func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 	var lastIndex uint64
 	backoff := time.Second
-	isFirstFetch := true
 
 	// Stagger initial queries with random jitter to avoid thundering herd
 	jitter := time.Duration(rand.Int63n(int64(100 * time.Millisecond)))
@@ -302,6 +301,20 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 		}
 		lastIndex = meta.LastIndex
 
+		// If there are no entries (no healthy instances yet), wait briefly and retry
+		// instead of falling into a 5-minute blocking query.
+		if len(entries) == 0 {
+			select {
+			case <-time.After(1 * time.Second):
+			case <-w.stopCh:
+				return
+			case <-stopCh:
+				return
+			}
+			lastIndex = 0 // reset to trigger immediate non-blocking query
+			continue
+		}
+
 		// Convert to our types
 		var instances []ServiceInstance
 		serviceMeta := make(map[string]string)
@@ -366,46 +379,25 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 			{Type: changeType, Service: svc},
 		})
 
-		// After the first successful fetch with instances, check if this service
-		// has any routing configuration. If not, stop watching to save resources.
-		// We only check when instances are present — a service with 0 healthy
-		// instances might still be initializing and have routing config.
-		if isFirstFetch && len(instances) > 0 {
-			isFirstFetch = false
-			if !hasRoutingTags(tags) && !hasRoutingMeta(serviceMeta) {
-				w.logger.Debug("service has no routing config, stopping health watcher",
-					zap.String("service", name),
-					zap.Int("instances", len(instances)),
-					zap.Int("tags", len(tags)),
-				)
-				return
-			}
-		}
+		// Note: routing config detection is handled at the catalog level
+		// (in reconcileServices). Services that pass the catalog filter
+		// keep their health watcher running — instances may register
+		// gradually and not all have routing tags initially.
 	}
 }
 
-// hasRoutingTags returns true if any tag indicates routing config (urlprefix- or caddy-).
+// hasRoutingTags returns true if any tag indicates routing config.
+// Checks for urlprefix- tags (Fabio) or caddy-host/caddy-protocol/caddy-route-N-* tags (native).
+// Generic "caddy-" prefixed tags that aren't routing keys are ignored.
 func hasRoutingTags(tags []string) bool {
 	for _, tag := range tags {
 		if strings.HasPrefix(tag, "urlprefix-") {
 			return true
 		}
-		if strings.HasPrefix(tag, "caddy-") {
-			return true
-		}
 	}
 	return false
 }
 
-// hasRoutingMeta returns true if any metadata key indicates routing config.
-func hasRoutingMeta(meta map[string]string) bool {
-	for k := range meta {
-		if strings.HasPrefix(k, "caddy-") {
-			return true
-		}
-	}
-	return false
-}
 
 // isHealthy determines if a service entry is healthy based on the health policy.
 func (w *ConsulWatcher) isHealthy(entry *consul.ServiceEntry) bool {
