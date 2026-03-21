@@ -94,18 +94,11 @@ func (w *ConsulWatcher) RestoreState(catalogIndex uint64, services map[string]*p
 }
 
 // Start begins watching Consul for service changes. Non-blocking.
-// If state was restored via RestoreState, the watcher resumes with blocking
-// queries (no burst of initial fetches).
+// If state was restored via RestoreState, the watcher does NOT re-start
+// health watchers for all restored services — the routes are already served
+// from persisted state. Only the catalog watcher starts, and it will detect
+// changes incrementally using the restored catalog index.
 func (w *ConsulWatcher) Start() {
-	// Start health watchers for any restored services
-	w.mu.RLock()
-	for name, svc := range w.services {
-		if svc.LastIndex > 0 {
-			w.startServiceWatch(name)
-		}
-	}
-	w.mu.RUnlock()
-
 	go w.watchCatalog()
 }
 
@@ -201,16 +194,13 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 		)
 	}
 
-	// Start watchers for new services
+	// Start watchers for new or restored services
 	var skippedNoRouting int
 	for name := range currentNames {
-		if _, exists := w.services[name]; !exists {
-			catalogTags := catalogServices[name]
+		catalogTags := catalogServices[name]
 
+		if _, exists := w.services[name]; !exists {
 			// Skip services with no routing config visible in catalog tags.
-			// Services using metadata (not tags) won't have routing info in
-			// the catalog, so we only skip if tags are present but none are
-			// routing-related.
 			if len(catalogTags) > 0 && !hasRoutingTags(catalogTags) {
 				skippedNoRouting++
 				continue
@@ -222,6 +212,20 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 				Tags: catalogTags,
 			}
 			w.startServiceWatch(name)
+		} else {
+			// Service exists (possibly from restored state) — ensure it has
+			// a running health watcher.
+			w.serviceStopMu.Lock()
+			_, hasWatcher := w.serviceStopChs[name]
+			w.serviceStopMu.Unlock()
+
+			if !hasWatcher {
+				// Skip services without routing tags (same filter as new services)
+				if len(catalogTags) > 0 && !hasRoutingTags(catalogTags) {
+					continue
+				}
+				w.startServiceWatch(name)
+			}
 		}
 	}
 	if skippedNoRouting > 0 {
@@ -280,6 +284,7 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 	w.mu.RUnlock()
 
 	backoff := time.Second
+	firstQuery := true
 
 	// Stagger initial queries with random jitter to avoid thundering herd
 	jitter := time.Duration(rand.Int63n(int64(100 * time.Millisecond)))
@@ -300,11 +305,13 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 		default:
 		}
 
-		// Acquire semaphore for non-blocking queries (initial fetches and retries)
-		// to avoid overwhelming Consul. Blocking queries (WaitIndex > 0) are
-		// long-polls that Consul handles efficiently — they don't need throttling.
-		isBlocking := lastIndex > 0
-		if !isBlocking {
+		// Acquire semaphore for the first query from this goroutine (whether
+		// fresh or restored) and for non-blocking retries. This prevents a
+		// thundering herd when many services are restored or discovered at once.
+		// Subsequent blocking queries (long-polls) bypass the semaphore since
+		// Consul handles them efficiently.
+		needsSemaphore := firstQuery || lastIndex == 0
+		if needsSemaphore {
 			select {
 			case w.healthSem <- struct{}{}:
 			case <-w.stopCh:
@@ -323,9 +330,10 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 		entries, meta, err := w.client.Health().Service(name, "", passingOnly, opts)
 
-		// Release semaphore for non-blocking queries
-		if !isBlocking {
+		// Release semaphore
+		if needsSemaphore {
 			<-w.healthSem
+			firstQuery = false
 		}
 
 		if err != nil {
