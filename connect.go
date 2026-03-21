@@ -74,36 +74,3 @@ func (sr *SidecarResolver) ResolveUpstreams(route *RouteDefinition) error {
 		route.ServiceName, proxyServiceID)
 }
 
-// DirectResolver resolves upstream addresses for direct mTLS mode.
-// In direct mode, we use the service's actual address (not sidecar bind port)
-// and the CertManager provides the mTLS credentials.
-type DirectResolver struct {
-	client      *consul.Client
-	logger      *zap.Logger
-	serviceName string // Caddy's service name for leaf cert identity
-}
-
-// NewDirectResolver creates a new DirectResolver.
-func NewDirectResolver(client *consul.Client, logger *zap.Logger, serviceName string) *DirectResolver {
-	return &DirectResolver{
-		client:      client,
-		logger:      logger,
-		serviceName: serviceName,
-	}
-}
-
-// ResolveUpstreams keeps the route's existing upstreams (direct service addresses)
-// unchanged. In direct mode, TLS credentials are injected at the HTTP route
-// generation step, not here.
-func (dr *DirectResolver) ResolveUpstreams(route *RouteDefinition) error {
-	if len(route.Upstreams) == 0 {
-		return fmt.Errorf("no upstreams available for direct connect to service %s", route.ServiceName)
-	}
-
-	dr.logger.Debug("using direct connect for service",
-		zap.String("service", route.ServiceName),
-		zap.Int("upstreams", len(route.Upstreams)),
-	)
-
-	return nil
-}

@@ -26,6 +26,7 @@ services:
       - "8443:443/udp"  # HTTP/3 (QUIC)
       - "2019:2019"
       - "15432:15432"   # TCP test port (postgres-like)
+      - "16432:16432"   # TCP test port (deregister test)
       - "13306:13306"   # TCP test port (mysql-like)
     volumes:
       - ./integration-test/etc/Caddyfile:/etc/caddy/Caddyfile:ro

@@ -261,3 +261,52 @@ func TestCompile_MixedProtocols(t *testing.T) {
 	assert.Len(t, result.TCPRoutes, 1)
 	assert.Empty(t, result.Conflicts)
 }
+
+func TestCompile_RedirectRoute_NoUpstreamsNeeded(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:  "redirect-svc",
+			Protocol:     ProtocolHTTP,
+			Host:         "old.example.com",
+			Path:         "/",
+			RedirectCode: 301,
+			RedirectURL:  "https://new.example.com{http.request.uri}",
+			Enabled:      true,
+			// No upstreams — redirect routes don't need them
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Equal(t, 301, result.HTTPRoutes[0].RedirectCode)
+	assert.Equal(t, "https://new.example.com{http.request.uri}", result.HTTPRoutes[0].RedirectURL)
+	assert.Empty(t, result.HTTPRoutes[0].Upstreams)
+}
+
+func TestCompile_RedirectAndProxy_Coexist(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:  "redirect-svc",
+			Protocol:     ProtocolHTTP,
+			Host:         "old.example.com",
+			Path:         "/",
+			RedirectCode: 301,
+			RedirectURL:  "https://new.example.com{http.request.uri}",
+			Enabled:      true,
+		},
+		{
+			ServiceName: "proxy-svc",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Path:        "/",
+			Upstreams:   []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+			Enabled:     true,
+		},
+	}
+
+	result := rc.Compile(routes)
+	assert.Len(t, result.HTTPRoutes, 2)
+	assert.Empty(t, result.Conflicts)
+}

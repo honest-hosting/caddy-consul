@@ -40,20 +40,8 @@ func TestIntegration_Connect_Sidecar_ServiceRegistered(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	// Register the backend service with Connect + sidecar
-	err = registerConnectService(client, "echo-connect-sidecar", "echo-connect", 8080,
-		map[string]string{
-			"caddy-host":          "sidecar.localdev",
-			"caddy-protocol":      "http",
-			"caddy-upstream-mode": "connect-sidecar",
-		},
-	)
-	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "echo-connect-sidecar") }()
-
-	// Register Caddy's sidecar with an upstream for the backend.
-	// This is separate from auto-registration — it adds upstream entries
-	// to the sidecar proxy config that caddy-consul reads.
+	// Register Caddy's sidecar with an upstream for the backend FIRST,
+	// so the upstream entry exists when the watcher processes the backend.
 	err = registerCaddySidecarWithUpstreams(client, []consul.Upstream{
 		{
 			DestinationName: "echo-connect-sidecar",
@@ -61,32 +49,58 @@ func TestIntegration_Connect_Sidecar_ServiceRegistered(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	// Don't defer deregister of connectServiceName — auto-registration owns it
+
+	// Register the backend service with Connect + sidecar
+	err = registerConnectService(client, "echo-connect-sidecar", "echo-connect", 8080,
+		map[string]string{
+			"caddy-host":     "sidecar.localdev",
+			"caddy-protocol": "http",
+		},
+	)
+	require.NoError(t, err)
+	defer func() {
+		_ = deregisterService(client, "echo-connect-sidecar")
+		_ = waitForHTTPRouteGone("sidecar.localdev", 10*time.Second)
+	}()
 
 	err = waitForConsulService(client, "echo-connect-sidecar", 10*time.Second)
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
+	// Verify the route was injected into Caddy's config
+	route, err := waitForHTTPRoute("sidecar.localdev", 15*time.Second)
+	require.NoError(t, err, "connect-sidecar route for sidecar.localdev should be injected")
 
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Verify it has a reverse_proxy handler
+	handler, ok := getReverseProxyHandler(route)
+	require.True(t, ok, "route should have a reverse_proxy handler")
+
+	// In sidecar mode, upstream should be localhost:<bind_port> (127.0.0.1:9191)
+	upstreams := getReverseProxyUpstreams(handler)
+	require.NotEmpty(t, upstreams, "should have upstreams")
+	assert.Equal(t, "127.0.0.1:9191", upstreams[0],
+		"sidecar route upstream should point to local sidecar bind address")
+
+	// Sidecar mode should NOT have TLS transport (sidecar handles mTLS)
+	assert.False(t, reverseProxyHasTLSTransport(handler),
+		"sidecar mode route should not have TLS transport (sidecar handles mTLS)")
 }
 
 func TestIntegration_Connect_Sidecar_NoUpstream(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	// Register backend with connect-sidecar mode
+	// Register backend with connect proxy enabled
 	err = registerConnectService(client, "echo-no-upstream", "echo-connect", 8080,
 		map[string]string{
-			"caddy-host":          "no-upstream.localdev",
-			"caddy-protocol":      "http",
-			"caddy-upstream-mode": "connect-sidecar",
+			"caddy-host":     "no-upstream.localdev",
+			"caddy-protocol": "http",
 		},
 	)
 	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "echo-no-upstream") }()
+	defer func() {
+		_ = deregisterService(client, "echo-no-upstream")
+		_ = waitForHTTPRouteGone("no-upstream.localdev", 10*time.Second)
+	}()
 
 	// Register Caddy's sidecar WITHOUT the upstream for this service
 	err = registerCaddySidecarWithUpstreams(client, []consul.Upstream{
@@ -97,13 +111,26 @@ func TestIntegration_Connect_Sidecar_NoUpstream(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
-
-	// The route should NOT be injected (no upstream in sidecar).
-	// Caddy should still be running fine.
-	config, err := getCaddyConfig()
+	// Wait for Consul to discover the service and caddy-consul to process it
+	err = waitForConsulService(client, "echo-no-upstream", 10*time.Second)
 	require.NoError(t, err)
-	assert.NotNil(t, config)
+
+	// When connect_proxy_enable and service_proxy_enable are both true,
+	// sidecar resolution fails for this service (no upstream entry), so
+	// caddy-consul falls back to direct routing. The route should appear
+	// with the service's actual address (not a sidecar address).
+	route, err := waitForHTTPRoute("no-upstream.localdev", 15*time.Second)
+	require.NoError(t, err, "route should be injected via direct fallback when sidecar has no upstream")
+
+	handler, ok := getReverseProxyHandler(route)
+	require.True(t, ok)
+
+	upstreams := getReverseProxyUpstreams(handler)
+	require.NotEmpty(t, upstreams)
+	assert.Contains(t, upstreams[0], "8080",
+		"fallback direct route should point to actual service address")
+	assert.False(t, reverseProxyHasTLSTransport(handler),
+		"direct fallback route should not have TLS transport")
 }
 
 func TestIntegration_Connect_Sidecar_ServiceDeregister(t *testing.T) {
@@ -112,9 +139,8 @@ func TestIntegration_Connect_Sidecar_ServiceDeregister(t *testing.T) {
 
 	err = registerConnectService(client, "echo-dereg", "echo-connect", 8080,
 		map[string]string{
-			"caddy-host":          "dereg.localdev",
-			"caddy-protocol":      "http",
-			"caddy-upstream-mode": "connect-sidecar",
+			"caddy-host":     "dereg.localdev",
+			"caddy-protocol": "http",
 		},
 	)
 	require.NoError(t, err)
@@ -124,62 +150,17 @@ func TestIntegration_Connect_Sidecar_ServiceDeregister(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
+	// Verify the route appears first
+	_, err = waitForHTTPRoute("dereg.localdev", 15*time.Second)
+	require.NoError(t, err, "route for dereg.localdev should appear after registration")
 
 	// Deregister the backend
 	err = deregisterService(client, "echo-dereg")
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
-
-	// Caddy should still be healthy
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
-}
-
-// --- Direct mode tests ---
-// These rely on auto-registration (connect_auto_register=true in Caddyfile)
-// to provide Caddy's mesh identity. No need to register connectServiceName manually.
-
-func TestIntegration_Connect_Direct_ServiceRegistered(t *testing.T) {
-	client, err := newConsulClient()
-	require.NoError(t, err)
-
-	// Register a backend service with connect-direct mode
-	err = registerConnectService(client, "echo-connect-direct", "echo-connect", 8080,
-		map[string]string{
-			"caddy-host":          "direct.localdev",
-			"caddy-protocol":      "http",
-			"caddy-upstream-mode": "connect-direct",
-		},
-	)
-	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "echo-connect-direct") }()
-
-	err = waitForConsulService(client, "echo-connect-direct", 10*time.Second)
-	require.NoError(t, err)
-
-	time.Sleep(3 * time.Second)
-
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
-}
-
-func TestIntegration_Connect_Direct_CertAvailable(t *testing.T) {
-	client, err := newConsulClient()
-	require.NoError(t, err)
-
-	// Auto-registration should have registered caddy-test-ingress.
-	// Give time for cert manager to fetch leaf cert.
-	time.Sleep(5 * time.Second)
-
-	// Verify we can fetch a leaf cert for our service identity
-	leaf, _, err := client.Agent().ConnectCALeaf(connectServiceName, nil)
-	require.NoError(t, err, "should be able to fetch leaf cert for %s", connectServiceName)
-	assert.NotEmpty(t, leaf.CertPEM)
-	assert.NotEmpty(t, leaf.PrivateKeyPEM)
+	// Verify the route disappears
+	err = waitForHTTPRouteGone("dereg.localdev", 10*time.Second)
+	assert.NoError(t, err, "route for dereg.localdev should disappear after deregistration")
 }
 
 // --- Intention tests ---

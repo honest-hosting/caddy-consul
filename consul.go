@@ -23,20 +23,22 @@ type ConsulRouter struct {
 	ConsulDC     string `json:"consul_dc,omitempty"`
 
 	// TLS to Consul
-	ConsulTLSCA   string `json:"consul_tls_ca,omitempty"`
-	ConsulTLSCert string `json:"consul_tls_cert,omitempty"`
-	ConsulTLSKey  string `json:"consul_tls_key,omitempty"`
+	ConsulTLSCA             string `json:"consul_tls_ca,omitempty"`
+	ConsulTLSCert           string `json:"consul_tls_cert,omitempty"`
+	ConsulTLSKey            string `json:"consul_tls_key,omitempty"`
+	ConsulTLSSkipVerify     bool   `json:"consul_tls_skip_verify,omitempty"`
 
 	// Behavior
-	HealthPolicy     string `json:"health_policy,omitempty"`
-	ConflictPolicy   string `json:"conflict_policy,omitempty"`
-	ConnectMode      string `json:"connect_mode,omitempty"`
+	ServiceProxyEnable *bool  `json:"service_proxy_enable,omitempty"`
+	HealthPolicy       string `json:"health_policy,omitempty"`
+	ConflictPolicy     string `json:"conflict_policy,omitempty"`
+	ConnectProxyEnable *bool  `json:"connect_proxy_enable,omitempty"`
 	DebounceDuration   string `json:"debounce_duration,omitempty"`
 	MaxConcurrentChecks int   `json:"max_concurrent_checks,omitempty"`
 
 	// Connect
 	ConnectServiceName  string `json:"connect_service_name,omitempty"`
-	ConnectAutoRegister bool   `json:"connect_auto_register"`
+	ConnectAutoRegister *bool  `json:"connect_auto_register,omitempty"`
 
 	// Metrics
 	Metrics string `json:"metrics,omitempty"`
@@ -46,10 +48,7 @@ type ConsulRouter struct {
 	compiler            *RouteCompiler       `json:"-"`
 	reconciler          *Reconciler          `json:"-"`
 	sidecarResolver     *SidecarResolver     `json:"-"`
-	directResolver      *DirectResolver      `json:"-"`
-	certManager         *CertManager         `json:"-"`
 	registrar           *ServiceRegistrar    `json:"-"`
-	connectAutoRegisterSet bool              `json:"-"` // tracks if explicitly set in Caddyfile
 }
 
 // CaddyModule returns the Caddy module information.
@@ -76,11 +75,12 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		zap.String("consul_addr", cr.ConsulAddr),
 		zap.String("consul_scheme", cr.ConsulScheme),
 		zap.String("admin_addr", adminAddr),
+		zap.Bool("service_proxy_enable", boolVal(cr.ServiceProxyEnable)),
 		zap.String("health_policy", cr.HealthPolicy),
 		zap.String("conflict_policy", cr.ConflictPolicy),
-		zap.String("connect_mode", cr.ConnectMode),
+		zap.Bool("connect_proxy_enable", boolVal(cr.ConnectProxyEnable)),
 		zap.String("connect_service_name", cr.ConnectServiceName),
-		zap.Bool("connect_auto_register", cr.ConnectAutoRegister),
+		zap.Bool("connect_auto_register", boolVal(cr.ConnectAutoRegister)),
 		zap.String("debounce", cr.DebounceDuration),
 	)
 
@@ -90,28 +90,29 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("caddy-consul: failed to create consul client: %w", err)
 	}
 
-	// Initialize components
-	cr.compiler = NewRouteCompiler(cr.logger)
-	cr.reconciler = NewReconciler(cr.logger, adminAddr)
+	// Service discovery components
+	if boolVal(cr.ServiceProxyEnable) || boolVal(cr.ConnectProxyEnable) {
+		cr.compiler = NewRouteCompiler(cr.logger)
+		cr.reconciler = NewReconciler(cr.logger, adminAddr)
 
-	// Connect resolvers
-	cr.sidecarResolver = NewSidecarResolver(consulClient, cr.logger, cr.ConnectServiceName)
-	cr.directResolver = NewDirectResolver(consulClient, cr.logger, cr.ConnectServiceName)
-	cr.certManager = NewCertManager(consulClient, cr.logger, cr.ConnectServiceName, ctx)
-
-	// Auto-registration
-	if cr.ConnectAutoRegister {
-		cr.registrar = NewServiceRegistrar(consulClient, cr.logger, cr.ConnectServiceName)
+		cr.watcher = NewConsulWatcher(
+			consulClient,
+			cr.logger,
+			cr.parsedHealthPolicy(),
+			cr.parsedDebounceDuration(),
+			cr.MaxConcurrentChecks,
+			cr.onServicesChanged,
+		)
 	}
 
-	cr.watcher = NewConsulWatcher(
-		consulClient,
-		cr.logger,
-		cr.parsedHealthPolicy(),
-		cr.parsedDebounceDuration(),
-		cr.MaxConcurrentChecks,
-		cr.onServicesChanged,
-	)
+	// Connect components
+	if boolVal(cr.ConnectProxyEnable) {
+		cr.sidecarResolver = NewSidecarResolver(consulClient, cr.logger, cr.ConnectServiceName)
+
+		if boolVal(cr.ConnectAutoRegister) {
+			cr.registrar = NewServiceRegistrar(consulClient, cr.logger, cr.ConnectServiceName)
+		}
+	}
 
 	return nil
 }
@@ -131,12 +132,9 @@ func (cr *ConsulRouter) Start() error {
 		}
 	}
 
-	// Start cert manager for direct mode
-	if cr.certManager != nil {
-		cr.certManager.Start()
+	if cr.watcher != nil {
+		cr.watcher.Start()
 	}
-
-	cr.watcher.Start()
 	return nil
 }
 
@@ -149,9 +147,6 @@ func (cr *ConsulRouter) Stop() error {
 	cr.logger.Info("caddy-consul stopping")
 	if cr.watcher != nil {
 		cr.watcher.Stop()
-	}
-	if cr.certManager != nil {
-		cr.certManager.Stop()
 	}
 	if cr.registrar != nil {
 		cr.registrar.Stop()
@@ -174,27 +169,36 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 
 	// Parse route definitions from all services
 	var allRoutes []RouteDefinition
-	for _, svc := range allServices {
-		routes := ParseServiceRoutes(svc, cr.ConnectMode, cr.logger)
+	serviceProxyEnabled := boolVal(cr.ServiceProxyEnable)
+	connectProxyEnabled := boolVal(cr.ConnectProxyEnable)
 
-		// Resolve connect upstreams based on mode
+	for _, svc := range allServices {
+		routes := ParseServiceRoutes(svc, cr.logger)
+
+		// Determine upstream mode for each route
 		for i := range routes {
-			switch routes[i].UpstreamMode {
-			case UpstreamConnectSidecar:
-				if err := cr.sidecarResolver.ResolveUpstreams(&routes[i]); err != nil {
-					cr.logger.Warn("failed to resolve connect sidecar upstream",
-						zap.String("service", routes[i].ServiceName),
-						zap.Error(err),
-					)
-					routes[i].Upstreams = nil // skip this route
+			// Redirect routes don't need upstream resolution
+			if routes[i].IsRedirect() {
+				continue
+			}
+
+			if connectProxyEnabled && cr.sidecarResolver != nil {
+				// Try sidecar resolution; if it succeeds, use connect-sidecar mode
+				if err := cr.sidecarResolver.ResolveUpstreams(&routes[i]); err == nil {
+					routes[i].UpstreamMode = UpstreamConnectSidecar
+					continue
 				}
-			case UpstreamConnectDirect:
-				if err := cr.directResolver.ResolveUpstreams(&routes[i]); err != nil {
-					cr.logger.Warn("failed to resolve connect direct upstream",
-						zap.String("service", routes[i].ServiceName),
-						zap.Error(err),
-					)
-				}
+				// Sidecar resolution failed — fall through to direct if enabled
+			}
+
+			if serviceProxyEnabled {
+				routes[i].UpstreamMode = UpstreamDirect
+			} else {
+				// Neither mode can route this service
+				cr.logger.Debug("no routing mode available for service; skipping",
+					zap.String("service", routes[i].ServiceName),
+				)
+				routes[i].Upstreams = nil
 			}
 		}
 
@@ -203,9 +207,6 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 
 	// Compile routes
 	compiled := cr.compiler.Compile(allRoutes)
-
-	// Inject TLS credentials for connect-direct HTTP routes
-	cr.injectDirectModeTLS(compiled, allRoutes)
 
 	// Log conflicts
 	for _, c := range compiled.Conflicts {
@@ -222,36 +223,6 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		cr.logger.Error("failed to reconcile routes",
 			zap.Error(err),
 		)
-	}
-}
-
-// injectDirectModeTLS populates TLS cert fields on compiled HTTP routes whose
-// source RouteDefinition used connect-direct mode.
-func (cr *ConsulRouter) injectDirectModeTLS(compiled *CompiledConfig, allRoutes []RouteDefinition) {
-	if cr.certManager == nil {
-		return
-	}
-
-	// Build lookup: service name → upstream mode
-	modeByService := make(map[string]UpstreamMode)
-	for _, r := range allRoutes {
-		modeByService[r.ServiceName] = r.UpstreamMode
-	}
-
-	leaf := cr.certManager.GetLeafCert()
-	caRoots := cr.certManager.GetCARoots()
-
-	if leaf == nil {
-		cr.logger.Warn("connect-direct routes exist but no leaf cert available yet")
-		return
-	}
-
-	for i := range compiled.HTTPRoutes {
-		if modeByService[compiled.HTTPRoutes[i].ServiceName] == UpstreamConnectDirect {
-			compiled.HTTPRoutes[i].TLSCertPEM = leaf.CertPEM
-			compiled.HTTPRoutes[i].TLSKeyPEM = leaf.KeyPEM
-			compiled.HTTPRoutes[i].TLSCACertPEM = caRoots
-		}
 	}
 }
 

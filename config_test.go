@@ -26,9 +26,11 @@ func TestUnmarshalCaddyfile_AllOptions(t *testing.T) {
 		tls_ca /etc/consul/ca.pem
 		tls_cert /etc/consul/cert.pem
 		tls_key /etc/consul/key.pem
+		insecure_skip_verify true
+		service_proxy_enable true
 		health_policy warning
 		conflict_policy first-wins
-		connect_mode sidecar
+		connect_proxy_enable true
 		debounce 1s
 		metrics /metrics/consul
 	}`
@@ -44,9 +46,11 @@ func TestUnmarshalCaddyfile_AllOptions(t *testing.T) {
 	assert.Equal(t, "/etc/consul/ca.pem", cr.ConsulTLSCA)
 	assert.Equal(t, "/etc/consul/cert.pem", cr.ConsulTLSCert)
 	assert.Equal(t, "/etc/consul/key.pem", cr.ConsulTLSKey)
+	assert.True(t, cr.ConsulTLSSkipVerify)
+	assert.True(t, boolVal(cr.ServiceProxyEnable))
 	assert.Equal(t, "warning", cr.HealthPolicy)
 	assert.Equal(t, "first-wins", cr.ConflictPolicy)
-	assert.Equal(t, "sidecar", cr.ConnectMode)
+	assert.True(t, boolVal(cr.ConnectProxyEnable))
 	assert.Equal(t, "1s", cr.DebounceDuration)
 	assert.Equal(t, "/metrics/consul", cr.Metrics)
 }
@@ -91,7 +95,8 @@ func TestApplyDefaults(t *testing.T) {
 	assert.Equal(t, DefaultConsulScheme, cr.ConsulScheme)
 	assert.Equal(t, DefaultHealthPolicy, cr.HealthPolicy)
 	assert.Equal(t, DefaultConflictPolicy, cr.ConflictPolicy)
-	assert.Equal(t, DefaultConnectMode, cr.ConnectMode)
+	assert.Equal(t, DefaultServiceProxyEnable, boolVal(cr.ServiceProxyEnable))
+	assert.Equal(t, DefaultConnectProxyEnable, boolVal(cr.ConnectProxyEnable))
 	assert.Equal(t, DefaultDebounce, cr.DebounceDuration)
 }
 
@@ -130,28 +135,23 @@ func TestValidate_Valid(t *testing.T) {
 }
 
 func TestValidate_InvalidHealthPolicy(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "bogus", ConflictPolicy: "reject", ConnectMode: "direct", DebounceDuration: "500ms", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "bogus", ConflictPolicy: "reject", DebounceDuration: "500ms", ConsulScheme: "http"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_InvalidConflictPolicy(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "bogus", ConnectMode: "direct", DebounceDuration: "500ms", ConsulScheme: "http"}
-	assert.Error(t, cr.validate())
-}
-
-func TestValidate_InvalidConnectMode(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "reject", ConnectMode: "bogus", DebounceDuration: "500ms", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "bogus", DebounceDuration: "500ms", ConsulScheme: "http"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_InvalidDebounce(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "reject", ConnectMode: "direct", DebounceDuration: "not-a-duration", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "reject", DebounceDuration: "not-a-duration", ConsulScheme: "http"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_TLSCertWithoutKey(t *testing.T) {
 	cr := &ConsulRouter{
-		HealthPolicy: "passing", ConflictPolicy: "reject", ConnectMode: "direct",
+		HealthPolicy: "passing", ConflictPolicy: "reject",
 		DebounceDuration: "500ms", ConsulScheme: "http",
 		ConsulTLSCert: "/path/cert.pem",
 	}

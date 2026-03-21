@@ -10,6 +10,7 @@
 		address consul:8500
 		health_policy passing
 		debounce 200ms
+		connect_proxy_enable true
 		connect_service_name caddy-test-ingress
 		connect_auto_register true
 	}

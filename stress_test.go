@@ -56,7 +56,7 @@ func TestConcurrent_MetadataParserParallel(t *testing.T) {
 					{Address: fmt.Sprintf("10.0.0.%d", n%256), Port: 8080, Healthy: true, Weight: 1},
 				},
 			}
-			routes := ParseServiceRoutes(svc, "direct", testLogger())
+			routes := ParseServiceRoutes(svc, testLogger())
 			assert.Len(t, routes, 1)
 			assert.Equal(t, fmt.Sprintf("svc-%d.example.com", n), routes[0].Host)
 		}(i)
@@ -265,7 +265,7 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, "direct", logger)
+			ParseServiceRoutes(svc, logger)
 		}
 	})
 
@@ -282,7 +282,7 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, "direct", logger)
+			ParseServiceRoutes(svc, logger)
 		}
 	})
 
@@ -305,7 +305,7 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, "direct", logger)
+			ParseServiceRoutes(svc, logger)
 		}
 	})
 }

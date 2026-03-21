@@ -36,8 +36,18 @@ func NewServiceRegistrar(client *consul.Client, logger *zap.Logger, serviceName 
 
 // Register registers Caddy as a service in Consul with Connect enabled
 // and starts a background goroutine to keep the TTL health check alive.
-// Safe to call multiple times (idempotent).
+// If the service is already registered, it skips re-registration to avoid
+// overwriting existing sidecar proxy configurations (e.g., upstream entries).
 func (sr *ServiceRegistrar) Register() error {
+	// Check if already registered to avoid overwriting sidecar proxy config
+	if _, _, err := sr.client.Agent().Service(sr.serviceName, nil); err == nil {
+		sr.logger.Info("caddy service already registered in consul, skipping re-registration",
+			zap.String("service_name", sr.serviceName),
+		)
+		go sr.ttlLoop()
+		return nil
+	}
+
 	reg := &consul.AgentServiceRegistration{
 		ID:   sr.serviceName,
 		Name: sr.serviceName,

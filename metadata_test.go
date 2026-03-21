@@ -14,7 +14,7 @@ func testLogger() *zap.Logger {
 
 func TestParseServiceRoutes_NoInstances(t *testing.T) {
 	svc := &ServiceState{Name: "web"}
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	assert.Nil(t, routes)
 }
 
@@ -26,7 +26,7 @@ func TestParseServiceRoutes_NoHealthyInstances(t *testing.T) {
 			{Address: "10.0.0.1", Port: 8080, Healthy: false},
 		},
 	}
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	assert.Nil(t, routes)
 }
 
@@ -46,7 +46,7 @@ func TestParseServiceRoutes_NonIndexedMeta(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 
 	r := routes[0]
@@ -77,7 +77,7 @@ func TestParseServiceRoutes_IndexedMeta(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 2)
 
 	assert.Equal(t, ProtocolHTTP, routes[0].Protocol)
@@ -101,7 +101,7 @@ func TestParseServiceRoutes_IndexedWinsOverNonIndexed(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Equal(t, "indexed.example.com", routes[0].Host)
 }
@@ -118,7 +118,7 @@ func TestParseServiceRoutes_MetadataWinsOverFabio(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Equal(t, "meta.example.com", routes[0].Host)
 }
@@ -135,7 +135,7 @@ func TestParseServiceRoutes_FabioTags(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 2)
 
 	assert.Equal(t, "app.example.com", routes[0].Host)
@@ -156,7 +156,7 @@ func TestParseServiceRoutes_FabioTCP(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 
 	assert.Equal(t, ProtocolTCP, routes[0].Protocol)
@@ -172,95 +172,26 @@ func TestParseServiceRoutes_FabioHTTPS(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Equal(t, ProtocolHTTPS, routes[0].Protocol)
 	assert.Equal(t, "secure.example.com", routes[0].Host)
 }
 
-func TestParseServiceRoutes_NoExplicitMode_DefaultsDirect(t *testing.T) {
+func TestParseServiceRoutes_DefaultModeDirect(t *testing.T) {
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{"caddy-host": "web.example.com"},
+		Meta: map[string]string{
+			"caddy-host": "web.example.com",
+		},
 		Instances: []ServiceInstance{
 			{Address: "10.0.0.1", Port: 8080, Healthy: true},
 		},
 	}
 
-	// Even with global mode "sidecar", no explicit mode → direct (no mesh)
-	routes := ParseServiceRoutes(svc, "sidecar", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Equal(t, UpstreamDirect, routes[0].UpstreamMode)
-}
-
-func TestParseServiceRoutes_BareConnect_GlobalSidecar(t *testing.T) {
-	svc := &ServiceState{
-		Name: "mesh-svc",
-		Meta: map[string]string{
-			"caddy-host":          "mesh.example.com",
-			"caddy-upstream-mode": "connect",
-		},
-		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true},
-		},
-	}
-
-	routes := ParseServiceRoutes(svc, "sidecar", testLogger())
-	require.Len(t, routes, 1)
-	assert.Equal(t, UpstreamConnectSidecar, routes[0].UpstreamMode)
-}
-
-func TestParseServiceRoutes_BareConnect_GlobalDirect(t *testing.T) {
-	svc := &ServiceState{
-		Name: "mesh-svc",
-		Meta: map[string]string{
-			"caddy-host":          "mesh.example.com",
-			"caddy-upstream-mode": "connect",
-		},
-		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true},
-		},
-	}
-
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
-	require.Len(t, routes, 1)
-	assert.Equal(t, UpstreamConnectDirect, routes[0].UpstreamMode)
-}
-
-func TestParseServiceRoutes_ExplicitConnectSidecar(t *testing.T) {
-	svc := &ServiceState{
-		Name: "mesh-svc",
-		Meta: map[string]string{
-			"caddy-host":          "mesh.example.com",
-			"caddy-upstream-mode": "connect-sidecar",
-		},
-		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true},
-		},
-	}
-
-	// Explicit connect-sidecar overrides global mode
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
-	require.Len(t, routes, 1)
-	assert.Equal(t, UpstreamConnectSidecar, routes[0].UpstreamMode)
-}
-
-func TestParseServiceRoutes_ExplicitConnectDirect(t *testing.T) {
-	svc := &ServiceState{
-		Name: "mesh-svc",
-		Meta: map[string]string{
-			"caddy-host":          "mesh.example.com",
-			"caddy-upstream-mode": "connect-direct",
-		},
-		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true},
-		},
-	}
-
-	// Explicit connect-direct overrides global mode
-	routes := ParseServiceRoutes(svc, "sidecar", testLogger())
-	require.Len(t, routes, 1)
-	assert.Equal(t, UpstreamConnectDirect, routes[0].UpstreamMode)
 }
 
 func TestParseServiceRoutes_DisabledRoute(t *testing.T) {
@@ -275,7 +206,7 @@ func TestParseServiceRoutes_DisabledRoute(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	assert.Len(t, routes, 0)
 }
 
@@ -290,7 +221,7 @@ func TestParseServiceRoutes_MultipleUpstreams(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Len(t, routes[0].Upstreams, 2)
 	assert.Equal(t, "10.0.0.1:8080", routes[0].Upstreams[0].Address)
@@ -367,6 +298,81 @@ func TestParseFabioTag_Basic(t *testing.T) {
 	}
 }
 
+func TestParseFabioTag_Redirect(t *testing.T) {
+	rd := parseFabioTag("urlprefix-www.habitat.dev/ redirect=301,https://www.honesthosting.io$path")
+	require.NotNil(t, rd)
+	assert.Equal(t, "www.habitat.dev", rd.Host)
+	assert.Equal(t, "/", rd.Path)
+	assert.Equal(t, 301, rd.RedirectCode)
+	assert.Equal(t, "https://www.honesthosting.io{http.request.uri}", rd.RedirectURL)
+	assert.True(t, rd.IsRedirect())
+}
+
+func TestParseFabioTag_RedirectWithPort80(t *testing.T) {
+	rd := parseFabioTag("urlprefix-www.habitat.dev:80/ redirect=301,https://www.honesthosting.io$path")
+	require.NotNil(t, rd)
+	assert.Equal(t, "www.habitat.dev", rd.Host) // :80 stripped
+	assert.Equal(t, 301, rd.RedirectCode)
+	assert.Equal(t, "https://www.honesthosting.io{http.request.uri}", rd.RedirectURL)
+}
+
+func TestParseFabioTag_RedirectWithPort443(t *testing.T) {
+	rd := parseFabioTag("urlprefix-secure.example.com:443/ redirect=302,https://other.com$path")
+	require.NotNil(t, rd)
+	assert.Equal(t, "secure.example.com", rd.Host) // :443 stripped
+	assert.Equal(t, 302, rd.RedirectCode)
+}
+
+func TestParseFabioTag_PortStripNonStandard(t *testing.T) {
+	rd := parseFabioTag("urlprefix-app.example.com:8080/")
+	require.NotNil(t, rd)
+	assert.Equal(t, "app.example.com:8080", rd.Host) // non-standard port kept
+}
+
+func TestParseServiceRoutes_NativeRedirect(t *testing.T) {
+	svc := &ServiceState{
+		Name: "redirect-svc",
+		Meta: map[string]string{
+			"caddy-host":          "old.example.com",
+			"caddy-redirect-code": "301",
+			"caddy-redirect-url":  "https://new.example.com{http.request.uri}",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 1)
+	assert.Equal(t, "old.example.com", routes[0].Host)
+	assert.Equal(t, 301, routes[0].RedirectCode)
+	assert.Equal(t, "https://new.example.com{http.request.uri}", routes[0].RedirectURL)
+	assert.True(t, routes[0].IsRedirect())
+}
+
+func TestParseServiceRoutes_IndexedRedirect(t *testing.T) {
+	svc := &ServiceState{
+		Name: "multi-redirect",
+		Meta: map[string]string{
+			"caddy-route-0-host":          "old.example.com",
+			"caddy-route-0-redirect-code": "301",
+			"caddy-route-0-redirect-url":  "https://new.example.com{http.request.uri}",
+			"caddy-route-1-host":          "app.example.com",
+			"caddy-route-1-path":          "/api",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 2)
+	assert.True(t, routes[0].IsRedirect())
+	assert.Equal(t, 301, routes[0].RedirectCode)
+	assert.False(t, routes[1].IsRedirect())
+	assert.Equal(t, "app.example.com", routes[1].Host)
+}
+
 func TestParseServiceRoutes_NoRoutingMetadata(t *testing.T) {
 	svc := &ServiceState{
 		Name: "plain",
@@ -377,7 +383,7 @@ func TestParseServiceRoutes_NoRoutingMetadata(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	assert.Nil(t, routes)
 }
 
@@ -394,7 +400,7 @@ func TestParseServiceRoutes_IndexedSNI(t *testing.T) {
 		},
 	}
 
-	routes := ParseServiceRoutes(svc, "direct", testLogger())
+	routes := ParseServiceRoutes(svc, testLogger())
 	require.Len(t, routes, 1)
 	assert.Equal(t, ProtocolTLSPassthrough, routes[0].Protocol)
 	assert.Equal(t, "db.example.com", routes[0].Host) // SNI maps to Host

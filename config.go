@@ -19,7 +19,8 @@ const (
 	DefaultConsulScheme        = "http"
 	DefaultHealthPolicy        = "passing"
 	DefaultConflictPolicy      = "reject"
-	DefaultConnectMode         = "direct"
+	DefaultServiceProxyEnable  = true
+	DefaultConnectProxyEnable  = false
 	DefaultDebounce            = "500ms"
 	DefaultConnectAutoRegister = true
 	DefaultMaxConcurrentChecks = 5
@@ -56,9 +57,11 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    tls_ca /path/to/ca.pem
 //	    tls_cert /path/to/cert.pem
 //	    tls_key /path/to/key.pem
+//	    insecure_skip_verify false
+//	    service_proxy_enable true
 //	    health_policy passing
 //	    conflict_policy reject
-//	    connect_mode direct
+//	    connect_proxy_enable false
 //	    connect_service_name my-ingress
 //	    connect_auto_register true
 //	    max_concurrent_checks 5
@@ -115,6 +118,32 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.ConsulTLSKey = d.Val()
 
+		case "insecure_skip_verify":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			switch d.Val() {
+			case "true":
+				cr.ConsulTLSSkipVerify = true
+			case "false":
+				cr.ConsulTLSSkipVerify = false
+			default:
+				return d.Errf("insecure_skip_verify must be 'true' or 'false', got '%s'", d.Val())
+			}
+
+		case "service_proxy_enable":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			switch d.Val() {
+			case "true":
+				cr.ServiceProxyEnable = boolPtr(true)
+			case "false":
+				cr.ServiceProxyEnable = boolPtr(false)
+			default:
+				return d.Errf("service_proxy_enable must be 'true' or 'false', got '%s'", d.Val())
+			}
+
 		case "health_policy":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -127,11 +156,18 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.ConflictPolicy = d.Val()
 
-		case "connect_mode":
+		case "connect_proxy_enable":
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			cr.ConnectMode = d.Val()
+			switch d.Val() {
+			case "true":
+				cr.ConnectProxyEnable = boolPtr(true)
+			case "false":
+				cr.ConnectProxyEnable = boolPtr(false)
+			default:
+				return d.Errf("connect_proxy_enable must be 'true' or 'false', got '%s'", d.Val())
+			}
 
 		case "connect_service_name":
 			if !d.NextArg() {
@@ -145,13 +181,12 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			switch d.Val() {
 			case "true":
-				cr.ConnectAutoRegister = true
+				cr.ConnectAutoRegister = boolPtr(true)
 			case "false":
-				cr.ConnectAutoRegister = false
+				cr.ConnectAutoRegister = boolPtr(false)
 			default:
 				return d.Errf("connect_auto_register must be 'true' or 'false', got '%s'", d.Val())
 			}
-			cr.connectAutoRegisterSet = true
 
 		case "max_concurrent_checks":
 			if !d.NextArg() {
@@ -207,14 +242,17 @@ func (cr *ConsulRouter) applyDefaults() {
 	if cr.ConsulTLSKey == "" {
 		cr.ConsulTLSKey = os.Getenv("CONSUL_CLIENT_KEY")
 	}
+	if cr.ServiceProxyEnable == nil {
+		cr.ServiceProxyEnable = boolPtr(DefaultServiceProxyEnable)
+	}
 	if cr.HealthPolicy == "" {
 		cr.HealthPolicy = DefaultHealthPolicy
 	}
 	if cr.ConflictPolicy == "" {
 		cr.ConflictPolicy = DefaultConflictPolicy
 	}
-	if cr.ConnectMode == "" {
-		cr.ConnectMode = DefaultConnectMode
+	if cr.ConnectProxyEnable == nil {
+		cr.ConnectProxyEnable = boolPtr(DefaultConnectProxyEnable)
 	}
 	if cr.DebounceDuration == "" {
 		cr.DebounceDuration = DefaultDebounce
@@ -225,8 +263,8 @@ func (cr *ConsulRouter) applyDefaults() {
 	if cr.ConnectServiceName == "" {
 		cr.ConnectServiceName = defaultConnectServiceName()
 	}
-	if !cr.connectAutoRegisterSet {
-		cr.ConnectAutoRegister = DefaultConnectAutoRegister
+	if cr.ConnectAutoRegister == nil {
+		cr.ConnectAutoRegister = boolPtr(DefaultConnectAutoRegister)
 	}
 }
 
@@ -242,12 +280,6 @@ func (cr *ConsulRouter) validate() error {
 	case "reject", "first-wins":
 	default:
 		return fmt.Errorf("conflict_policy must be 'reject' or 'first-wins', got '%s'", cr.ConflictPolicy)
-	}
-
-	switch cr.ConnectMode {
-	case "direct", "sidecar":
-	default:
-		return fmt.Errorf("connect_mode must be 'direct' or 'sidecar', got '%s'", cr.ConnectMode)
 	}
 
 	if _, err := time.ParseDuration(cr.DebounceDuration); err != nil {
@@ -339,15 +371,27 @@ func (cr *ConsulRouter) newConsulClient() (*consul.Client, error) {
 	cfg.Token = cr.ConsulToken
 	cfg.Datacenter = cr.ConsulDC
 
-	if cr.ConsulTLSCert != "" || cr.ConsulTLSCA != "" {
+	if cr.ConsulTLSCert != "" || cr.ConsulTLSCA != "" || cr.ConsulTLSSkipVerify {
 		cfg.TLSConfig = consul.TLSConfig{
-			CertFile: cr.ConsulTLSCert,
-			KeyFile:  cr.ConsulTLSKey,
-			CAFile:   cr.ConsulTLSCA,
+			CertFile:           cr.ConsulTLSCert,
+			KeyFile:            cr.ConsulTLSKey,
+			CAFile:             cr.ConsulTLSCA,
+			InsecureSkipVerify: cr.ConsulTLSSkipVerify,
 		}
 	}
 
 	return consul.NewClient(cfg)
+}
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(v bool) *bool { return &v }
+
+// boolVal returns the value of a *bool, defaulting to false if nil.
+func boolVal(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
 }
 
 func envOrDefault(key, defaultVal string) string {

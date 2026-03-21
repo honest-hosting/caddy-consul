@@ -1,6 +1,7 @@
 package integration_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -56,28 +57,28 @@ func TestIntegration_TCP_ServiceDeregister(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	// Register TCP service
-	err = registerTCPService(client, "tcp-temp", "echo-tcp", 9000, 15432)
+	// Use a unique port (16432) to avoid conflicts with other tests that
+	// register services on port 15432 with deferred cleanup.
+	const deregPort = 16432
+
+	err = registerTCPService(client, "tcp-temp", "echo-tcp", 9000, deregPort)
 	require.NoError(t, err)
 
+	// Verify the L4 server was created in Caddy's config
 	time.Sleep(5 * time.Second)
 
-	// Verify it's reachable
-	err = waitForTCP(caddyTCPPostgres, 10*time.Second)
-	require.NoError(t, err)
+	serverName := fmt.Sprintf("consul_tcp_%d", deregPort)
+	server, err := getCaddyTCPServer(serverName)
+	require.NoError(t, err, "L4 server %s should exist in Caddy config", serverName)
+	assert.NotNil(t, server)
 
 	// Deregister the service
 	err = deregisterService(client, "tcp-temp")
 	require.NoError(t, err)
 
-	time.Sleep(5 * time.Second)
-
-	// The TCP port should no longer be reachable (L4 server removed)
-	// We just verify Caddy is still healthy — the port may or may not
-	// be immediately unreachable depending on Caddy's shutdown timing.
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Wait and verify the L4 server was removed
+	err = waitForCaddyTCPServerGone(serverName, 15*time.Second)
+	assert.NoError(t, err, "L4 server %s should be removed after deregistration", serverName)
 }
 
 // --- TCP + Connect sidecar ---
@@ -86,18 +87,8 @@ func TestIntegration_TCP_Connect_Sidecar(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	// Register a TCP backend with connect-sidecar mode
-	err = registerConnectService(client, "tcp-connect-sidecar", "echo-tcp", 9000,
-		map[string]string{
-			"caddy-protocol":      "tcp",
-			"caddy-port":          "15432",
-			"caddy-upstream-mode": "connect-sidecar",
-		},
-	)
-	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "tcp-connect-sidecar") }()
-
-	// Register Caddy's sidecar with upstream for the TCP service
+	// Register Caddy's sidecar with upstream for the TCP service FIRST,
+	// so the upstream entry exists when the watcher processes the backend.
 	err = registerCaddySidecarWithUpstreams(client, []consul.Upstream{
 		{
 			DestinationName: "tcp-connect-sidecar",
@@ -106,43 +97,45 @@ func TestIntegration_TCP_Connect_Sidecar(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = waitForConsulService(client, "tcp-connect-sidecar", 10*time.Second)
-	require.NoError(t, err)
-
-	time.Sleep(3 * time.Second)
-
-	// Verify Caddy processed the service (config updated)
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
-}
-
-// --- TCP + Connect direct ---
-
-func TestIntegration_TCP_Connect_Direct(t *testing.T) {
-	client, err := newConsulClient()
-	require.NoError(t, err)
-
-	// Register a TCP backend with connect-direct mode
-	err = registerConnectService(client, "tcp-connect-direct", "echo-tcp", 9000,
+	// Register the TCP backend with connect proxy (sidecar)
+	err = registerConnectService(client, "tcp-connect-sidecar", "echo-tcp", 9000,
 		map[string]string{
-			"caddy-protocol":      "tcp",
-			"caddy-port":          "13306",
-			"caddy-upstream-mode": "connect-direct",
+			"caddy-protocol": "tcp",
+			"caddy-port":     "15432",
 		},
 	)
 	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "tcp-connect-direct") }()
+	defer func() { _ = deregisterService(client, "tcp-connect-sidecar") }()
 
-	err = waitForConsulService(client, "tcp-connect-direct", 10*time.Second)
+	err = waitForConsulService(client, "tcp-connect-sidecar", 10*time.Second)
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
+	// Wait for caddy-consul to process and create the L4 server
+	time.Sleep(5 * time.Second)
 
-	// Verify Caddy processed the service (config updated)
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Verify the L4 server was created in Caddy's config
+	server, err := getCaddyTCPServer("consul_tcp_15432")
+	require.NoError(t, err, "L4 server consul_tcp_15432 should exist for TCP connect-sidecar route")
+	assert.NotNil(t, server)
+
+	// Verify the server has routes with a proxy handler
+	routes, _ := server["routes"].([]interface{})
+	require.NotEmpty(t, routes, "L4 server should have at least one route")
+
+	routeMap := routes[0].(map[string]interface{})
+	handlers, _ := routeMap["handle"].([]interface{})
+	require.NotEmpty(t, handlers, "L4 route should have handlers")
+
+	handler := handlers[0].(map[string]interface{})
+	assert.Equal(t, "proxy", handler["handler"], "L4 handler should be proxy")
+
+	// Verify upstream points to sidecar bind address (127.0.0.1:9193)
+	upstreams, _ := handler["upstreams"].([]interface{})
+	require.NotEmpty(t, upstreams)
+	upstream := upstreams[0].(map[string]interface{})
+	dial := getL4ProxyUpstreamDial(upstream)
+	assert.Equal(t, "127.0.0.1:9193", dial,
+		"TCP sidecar upstream should point to local sidecar bind address")
 }
 
 // --- Post-TCP health check ---

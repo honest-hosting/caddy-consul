@@ -296,6 +296,217 @@ func getCaddyConfig() (map[string]interface{}, error) {
 	return config, nil
 }
 
+// --- Caddy config inspection helpers ---
+
+// getCaddyHTTPRoutes returns routes from ALL HTTP servers in Caddy's config.
+func getCaddyHTTPRoutes() ([]map[string]interface{}, error) {
+	config, err := getCaddyConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	apps, _ := config["apps"].(map[string]interface{})
+	if apps == nil {
+		return nil, fmt.Errorf("no apps in config")
+	}
+	httpApp, _ := apps["http"].(map[string]interface{})
+	if httpApp == nil {
+		return nil, fmt.Errorf("no http app in config")
+	}
+	servers, _ := httpApp["servers"].(map[string]interface{})
+	if servers == nil {
+		return nil, fmt.Errorf("no servers in http app")
+	}
+
+	// Collect routes from ALL servers
+	var allRoutes []map[string]interface{}
+	for _, srv := range servers {
+		srvMap, _ := srv.(map[string]interface{})
+		if srvMap == nil {
+			continue
+		}
+		routesRaw, _ := srvMap["routes"].([]interface{})
+		for _, r := range routesRaw {
+			if rm, ok := r.(map[string]interface{}); ok {
+				allRoutes = append(allRoutes, rm)
+			}
+		}
+	}
+
+	if len(allRoutes) == 0 {
+		return nil, fmt.Errorf("no routes found in any HTTP server")
+	}
+
+	return allRoutes, nil
+}
+
+// findHTTPRouteByHost searches Caddy's HTTP routes for one matching the given host.
+// Returns the route map and true if found.
+func findHTTPRouteByHost(host string) (map[string]interface{}, bool) {
+	routes, err := getCaddyHTTPRoutes()
+	if err != nil {
+		return nil, false
+	}
+
+	for _, route := range routes {
+		matchList, _ := route["match"].([]interface{})
+		for _, m := range matchList {
+			match, _ := m.(map[string]interface{})
+			hosts, _ := match["host"].([]interface{})
+			for _, h := range hosts {
+				if h == host {
+					return route, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// getReverseProxyHandler extracts the reverse_proxy handler from a route.
+func getReverseProxyHandler(route map[string]interface{}) (map[string]interface{}, bool) {
+	handlers, _ := route["handle"].([]interface{})
+	for _, h := range handlers {
+		hm, _ := h.(map[string]interface{})
+		if hm["handler"] == "reverse_proxy" {
+			return hm, true
+		}
+	}
+	return nil, false
+}
+
+// getStaticResponseHandler extracts the static_response handler from a route.
+func getStaticResponseHandler(route map[string]interface{}) (map[string]interface{}, bool) {
+	handlers, _ := route["handle"].([]interface{})
+	for _, h := range handlers {
+		hm, _ := h.(map[string]interface{})
+		if hm["handler"] == "static_response" {
+			return hm, true
+		}
+	}
+	return nil, false
+}
+
+// getStaticResponseLocation extracts the Location header from a static_response handler.
+func getStaticResponseLocation(handler map[string]interface{}) string {
+	headers, _ := handler["headers"].(map[string]interface{})
+	if headers == nil {
+		return ""
+	}
+	locations, _ := headers["Location"].([]interface{})
+	if len(locations) == 0 {
+		return ""
+	}
+	loc, _ := locations[0].(string)
+	return loc
+}
+
+// reverseProxyHasTLSTransport checks if a reverse_proxy handler has a TLS transport configured.
+func reverseProxyHasTLSTransport(handler map[string]interface{}) bool {
+	transport, _ := handler["transport"].(map[string]interface{})
+	if transport == nil {
+		return false
+	}
+	tls, _ := transport["tls"].(map[string]interface{})
+	return tls != nil
+}
+
+// getReverseProxyUpstreams extracts the upstream dial addresses from a reverse_proxy handler.
+func getReverseProxyUpstreams(handler map[string]interface{}) []string {
+	upstreamsRaw, _ := handler["upstreams"].([]interface{})
+	var addrs []string
+	for _, u := range upstreamsRaw {
+		um, _ := u.(map[string]interface{})
+		if dial, ok := um["dial"].(string); ok {
+			addrs = append(addrs, dial)
+		}
+	}
+	return addrs
+}
+
+// waitForHTTPRoute polls Caddy config until a route matching the host appears.
+func waitForHTTPRoute(host string, timeout time.Duration) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		route, found := findHTTPRouteByHost(host)
+		if found {
+			return route, nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("HTTP route for host %s not found in Caddy config within %s", host, timeout)
+}
+
+// waitForHTTPRouteGone polls Caddy config until a route matching the host disappears.
+func waitForHTTPRouteGone(host string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, found := findHTTPRouteByHost(host)
+		if !found {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("HTTP route for host %s still present in Caddy config after %s", host, timeout)
+}
+
+// getCaddyTCPServer returns a specific L4 TCP server from Caddy's config.
+func getCaddyTCPServer(serverName string) (map[string]interface{}, error) {
+	url := fmt.Sprintf("http://%s/config/apps/layer4/servers/%s", caddyAdmin, serverName)
+	resp, err := http.Get(url) //nolint:noctx // test helper
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GET %s returned %d", url, resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var server map[string]interface{}
+	if err := json.Unmarshal(body, &server); err != nil {
+		return nil, err
+	}
+	if server == nil {
+		return nil, fmt.Errorf("GET %s returned null", url)
+	}
+	return server, nil
+}
+
+// getL4ProxyUpstreamDial extracts the first dial address from an L4 proxy upstream.
+// In caddy-l4, the "dial" field is an array of strings (e.g. ["10.0.0.1:8080"]).
+func getL4ProxyUpstreamDial(upstream map[string]interface{}) string {
+	switch d := upstream["dial"].(type) {
+	case string:
+		return d
+	case []interface{}:
+		if len(d) > 0 {
+			if s, ok := d[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// waitForCaddyTCPServerGone polls Caddy config until an L4 server disappears.
+func waitForCaddyTCPServerGone(serverName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := getCaddyTCPServer(serverName)
+		if err != nil {
+			return nil // server is gone
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("L4 server %s still present in Caddy config after %s", serverName, timeout)
+}
+
 // waitForConsulService polls Consul until a service is registered and has healthy instances.
 func waitForConsulService(client *consul.Client, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

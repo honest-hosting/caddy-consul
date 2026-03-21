@@ -79,13 +79,27 @@ func TestIntegration_RegisterHTTPService(t *testing.T) {
 		nil,
 	)
 	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "echo-web") }()
+	defer func() {
+		_ = deregisterService(client, "echo-web")
+		_ = waitForHTTPRouteGone("echo.localdev", 10*time.Second)
+	}()
 
-	time.Sleep(3 * time.Second)
+	// Verify the route was actually injected into Caddy's config
+	route, err := waitForHTTPRoute("echo.localdev", 10*time.Second)
+	require.NoError(t, err, "route for echo.localdev should be injected into Caddy config")
 
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Verify the route has a reverse_proxy handler pointing at the echo service
+	handler, ok := getReverseProxyHandler(route)
+	require.True(t, ok, "route should have a reverse_proxy handler")
+
+	upstreams := getReverseProxyUpstreams(handler)
+	require.NotEmpty(t, upstreams, "reverse_proxy should have at least one upstream")
+
+	// The upstream should point at echo-http:8080 (the echo service address)
+	assert.Contains(t, upstreams[0], "8080", "upstream should point at echo service port")
+
+	// Non-connect route should NOT have TLS transport
+	assert.False(t, reverseProxyHasTLSTransport(handler), "plain service route should not have TLS transport")
 }
 
 func TestIntegration_RegisterAndDeregisterService(t *testing.T) {
@@ -101,16 +115,17 @@ func TestIntegration_RegisterAndDeregisterService(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
+	// Verify the route appears
+	_, err = waitForHTTPRoute("temp.localdev", 10*time.Second)
+	require.NoError(t, err, "route for temp.localdev should appear after registration")
 
+	// Deregister the service
 	err = deregisterService(client, "temp-svc")
 	require.NoError(t, err)
 
-	time.Sleep(3 * time.Second)
-
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Verify the route disappears
+	err = waitForHTTPRouteGone("temp.localdev", 10*time.Second)
+	assert.NoError(t, err, "route for temp.localdev should disappear after deregistration")
 }
 
 func TestIntegration_MetadataBasedRouting(t *testing.T) {
@@ -127,11 +142,33 @@ func TestIntegration_MetadataBasedRouting(t *testing.T) {
 		},
 	)
 	require.NoError(t, err)
-	defer func() { _ = deregisterService(client, "meta-svc") }()
+	defer func() {
+		_ = deregisterService(client, "meta-svc")
+		_ = waitForHTTPRouteGone("meta.localdev", 10*time.Second)
+	}()
 
-	time.Sleep(3 * time.Second)
+	// Verify route was injected with correct host and path matching
+	route, err := waitForHTTPRoute("meta.localdev", 10*time.Second)
+	require.NoError(t, err, "route for meta.localdev should be injected")
 
-	config, err := getCaddyConfig()
-	require.NoError(t, err)
-	assert.NotNil(t, config)
+	// Verify it has a reverse_proxy handler
+	handler, ok := getReverseProxyHandler(route)
+	require.True(t, ok, "route should have a reverse_proxy handler")
+
+	upstreams := getReverseProxyUpstreams(handler)
+	require.NotEmpty(t, upstreams, "should have upstreams")
+
+	// Verify path matcher includes /api*
+	matchList, _ := route["match"].([]interface{})
+	require.NotEmpty(t, matchList)
+	match := matchList[0].(map[string]interface{})
+	paths, _ := match["path"].([]interface{})
+	require.NotEmpty(t, paths)
+	assert.Equal(t, "/api*", paths[0], "path matcher should be /api*")
+
+	// Verify strip-prefix rewrite handler is present
+	handlers, _ := route["handle"].([]interface{})
+	require.GreaterOrEqual(t, len(handlers), 2, "should have rewrite + reverse_proxy handlers")
+	rewrite := handlers[0].(map[string]interface{})
+	assert.Equal(t, "rewrite", rewrite["handler"], "first handler should be rewrite for strip-prefix")
 }

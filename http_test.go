@@ -89,6 +89,74 @@ func TestBuildHTTPRouteJSON_NoHost(t *testing.T) {
 	assert.False(t, hasMatch)
 }
 
+func TestBuildHTTPRouteJSON_NoTransport(t *testing.T) {
+	route := CompiledHTTPRoute{
+		Host:        "plain.example.com",
+		ServiceName: "web-plain",
+		Upstreams:   []Upstream{{Address: "10.0.0.1:8080"}},
+		// No TLS fields
+	}
+
+	data, err := BuildHTTPRouteJSON(route)
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &result))
+
+	handler := result["handle"].([]interface{})[0].(map[string]interface{})
+	_, hasTransport := handler["transport"]
+	assert.False(t, hasTransport, "non-connect route should not have a transport field")
+}
+
+func TestBuildHTTPRouteJSON_Redirect(t *testing.T) {
+	route := CompiledHTTPRoute{
+		Host:         "old.example.com",
+		Path:         "/",
+		ServiceName:  "redirect-svc",
+		RedirectCode: 301,
+		RedirectURL:  "https://new.example.com{http.request.uri}",
+	}
+
+	data, err := BuildHTTPRouteJSON(route)
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &result))
+
+	// Should have a static_response handler, not reverse_proxy
+	handlers := result["handle"].([]interface{})
+	require.Len(t, handlers, 1)
+	handler := handlers[0].(map[string]interface{})
+	assert.Equal(t, "static_response", handler["handler"])
+	assert.Equal(t, "301", handler["status_code"])
+
+	// Check Location header
+	headers := handler["headers"].(map[string]interface{})
+	location := headers["Location"].([]interface{})
+	require.Len(t, location, 1)
+	assert.Equal(t, "https://new.example.com{http.request.uri}", location[0])
+}
+
+func TestBuildHTTPRouteJSON_RedirectNoUpstreams(t *testing.T) {
+	// Redirect routes should work even with zero upstreams
+	route := CompiledHTTPRoute{
+		Host:         "redir.example.com",
+		ServiceName:  "redir",
+		RedirectCode: 302,
+		RedirectURL:  "https://target.example.com/",
+	}
+
+	data, err := BuildHTTPRouteJSON(route)
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &result))
+
+	handler := result["handle"].([]interface{})[0].(map[string]interface{})
+	assert.Equal(t, "static_response", handler["handler"])
+	assert.Equal(t, "302", handler["status_code"])
+}
+
 func TestBuildHTTPRoutesJSON_Multiple(t *testing.T) {
 	routes := []CompiledHTTPRoute{
 		{

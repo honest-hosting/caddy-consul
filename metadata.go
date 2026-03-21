@@ -15,7 +15,7 @@ var indexedKeyRegex = regexp.MustCompile(`^caddy-route-(\d+)-(.+)$`)
 // ParseServiceRoutes extracts RouteDefinitions from a service's metadata and tags.
 // Metadata keys take precedence over tags. If indexed keys (caddy-route-N-*) exist,
 // non-indexed keys (caddy-*) are ignored.
-func ParseServiceRoutes(svc *ServiceState, defaultConnectMode string, logger *zap.Logger) []RouteDefinition {
+func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition {
 	if svc == nil || len(svc.Instances) == 0 {
 		return nil
 	}
@@ -85,9 +85,7 @@ func ParseServiceRoutes(svc *ServiceState, defaultConnectMode string, logger *za
 		routes[i].ServiceName = svc.Name
 		routes[i].Upstreams = upstreams
 
-		// Resolve upstream mode: normalize "connect" to the global default,
-		// and default empty to "direct" (no mesh)
-		routes[i].UpstreamMode = ResolveUpstreamMode(routes[i].UpstreamMode, defaultConnectMode)
+		routes[i].UpstreamMode = UpstreamDirect
 
 	}
 
@@ -155,9 +153,6 @@ func parseNonIndexedMeta(meta map[string]string) RouteDefinition {
 			rd.Port = port
 		}
 	}
-	if v, ok := meta["caddy-upstream-mode"]; ok {
-		rd.UpstreamMode = UpstreamMode(v)
-	}
 	if v, ok := meta["caddy-priority"]; ok {
 		if pri, err := strconv.Atoi(v); err == nil {
 			rd.Priority = pri
@@ -170,6 +165,14 @@ func parseNonIndexedMeta(meta map[string]string) RouteDefinition {
 	}
 	if v, ok := meta["caddy-strip-prefix"]; ok {
 		rd.StripPrefix = v == "true"
+	}
+	if v, ok := meta["caddy-redirect-code"]; ok {
+		if code, err := strconv.Atoi(v); err == nil {
+			rd.RedirectCode = code
+		}
+	}
+	if v, ok := meta["caddy-redirect-url"]; ok {
+		rd.RedirectURL = v
 	}
 	if v, ok := meta["caddy-enabled"]; ok {
 		rd.Enabled = v != "false"
@@ -234,9 +237,6 @@ func parseIndexedMeta(meta map[string]string) []RouteDefinition {
 		if v, ok := fields["sni"]; ok {
 			rd.Host = v // SNI maps to Host for TCP/TLS routes
 		}
-		if v, ok := fields["upstream-mode"]; ok {
-			rd.UpstreamMode = UpstreamMode(v)
-		}
 		if v, ok := fields["priority"]; ok {
 			if pri, err := strconv.Atoi(v); err == nil {
 				rd.Priority = pri
@@ -249,6 +249,14 @@ func parseIndexedMeta(meta map[string]string) []RouteDefinition {
 		}
 		if v, ok := fields["strip-prefix"]; ok {
 			rd.StripPrefix = v == "true"
+		}
+		if v, ok := fields["redirect-code"]; ok {
+			if code, err := strconv.Atoi(v); err == nil {
+				rd.RedirectCode = code
+			}
+		}
+		if v, ok := fields["redirect-url"]; ok {
+			rd.RedirectURL = v
 		}
 		if v, ok := fields["enabled"]; ok {
 			rd.Enabled = v != "false"
@@ -326,6 +334,18 @@ func parseFabioTag(tag string) *RouteDefinition {
 		rd.StripPrefix = true
 	}
 
+	// Parse redirect modifier: redirect=CODE,URL
+	if redir, ok := modifiers["redirect"]; ok {
+		parts := strings.SplitN(redir, ",", 2)
+		if len(parts) == 2 {
+			if code, err := strconv.Atoi(parts[0]); err == nil && code >= 300 && code < 400 {
+				rd.RedirectCode = code
+				// Replace Fabio's $path variable with Caddy's request URI placeholder
+				rd.RedirectURL = strings.ReplaceAll(parts[1], "$path", "{http.request.uri}")
+			}
+		}
+	}
+
 	// Parse URL part based on protocol
 	if rd.Protocol == ProtocolTCP {
 		// TCP format: :port
@@ -340,7 +360,7 @@ func parseFabioTag(tag string) *RouteDefinition {
 			return nil
 		}
 	} else {
-		// HTTP format: host/path or host
+		// HTTP format: host/path or host (may include :port)
 		if idx := strings.IndexByte(urlPart, '/'); idx >= 0 {
 			rd.Host = urlPart[:idx]
 			rd.Path = urlPart[idx:]
@@ -348,7 +368,21 @@ func parseFabioTag(tag string) *RouteDefinition {
 			rd.Host = urlPart
 			rd.Path = "/"
 		}
+		// Strip standard ports — browsers don't send them in the Host header,
+		// so Caddy's host matcher won't match "host:80" or "host:443".
+		rd.Host = stripStandardPort(rd.Host)
 	}
 
 	return rd
+}
+
+// stripStandardPort removes :80 or :443 suffixes from a hostname.
+func stripStandardPort(host string) string {
+	if strings.HasSuffix(host, ":80") {
+		return strings.TrimSuffix(host, ":80")
+	}
+	if strings.HasSuffix(host, ":443") {
+		return strings.TrimSuffix(host, ":443")
+	}
+	return host
 }

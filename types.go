@@ -16,31 +16,11 @@ type UpstreamMode string
 const (
 	UpstreamDirect         UpstreamMode = "direct"          // no mesh, connect directly
 	UpstreamConnectSidecar UpstreamMode = "connect-sidecar" // via local sidecar proxy
-	UpstreamConnectDirect  UpstreamMode = "connect-direct"  // Caddy dials mTLS itself
 )
-
-// ResolveUpstreamMode normalizes upstream mode values.
-// Explicit "direct", "connect-sidecar", "connect-direct" are returned as-is.
-// Bare "connect" resolves to the global connect_mode (sidecar or direct).
-// Empty string defaults to "direct" (no mesh).
-func ResolveUpstreamMode(mode UpstreamMode, globalConnectMode string) UpstreamMode {
-	switch mode {
-	case UpstreamDirect, UpstreamConnectSidecar, UpstreamConnectDirect:
-		return mode
-	case "connect":
-		// Bare "connect" uses the global connect_mode to decide sidecar vs direct
-		if globalConnectMode == "sidecar" {
-			return UpstreamConnectSidecar
-		}
-		return UpstreamConnectDirect
-	default:
-		return UpstreamDirect
-	}
-}
 
 // IsConnect returns true if the mode involves Consul Connect.
 func (m UpstreamMode) IsConnect() bool {
-	return m == UpstreamConnectSidecar || m == UpstreamConnectDirect
+	return m == UpstreamConnectSidecar
 }
 
 // HealthPolicy controls which instances are considered routable.
@@ -151,6 +131,13 @@ type RouteDefinition struct {
 	StripPrefix  bool
 	Enabled      bool
 	Upstreams    []Upstream
+	RedirectCode int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
+	RedirectURL  string // redirect target URL template (may contain {http.request.uri})
+}
+
+// IsRedirect returns true if this route is an HTTP redirect (not a proxy).
+func (rd *RouteDefinition) IsRedirect() bool {
+	return rd.RedirectCode > 0 && rd.RedirectURL != ""
 }
 
 // Upstream represents a single backend target.
@@ -170,16 +157,13 @@ type Conflict struct {
 
 // CompiledHTTPRoute is a Consul-managed HTTP route ready for injection into Caddy config.
 type CompiledHTTPRoute struct {
-	Host        string
-	Path        string
-	Upstreams   []Upstream
-	StripPrefix bool
-	ServiceName string
-
-	// Connect direct mode TLS config (empty for non-Connect or sidecar mode)
-	TLSCertPEM   []byte // client certificate PEM
-	TLSKeyPEM    []byte // client key PEM
-	TLSCACertPEM []byte // CA root certificate PEM
+	Host         string
+	Path         string
+	Upstreams    []Upstream
+	StripPrefix  bool
+	ServiceName  string
+	RedirectCode int
+	RedirectURL  string
 }
 
 // CompiledTCPRoute is a Consul-managed TCP route ready for injection into Caddy config.

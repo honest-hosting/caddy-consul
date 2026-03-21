@@ -1,21 +1,12 @@
 package caddyconsul
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
 
 // BuildHTTPRouteJSON builds the Caddy JSON config fragment for an HTTP route.
 func BuildHTTPRouteJSON(route CompiledHTTPRoute) (json.RawMessage, error) {
-	// Build upstreams
-	upstreams := make([]map[string]interface{}, 0, len(route.Upstreams))
-	for _, u := range route.Upstreams {
-		upstreams = append(upstreams, map[string]interface{}{
-			"dial": u.Address,
-		})
-	}
-
 	// Build matchers
 	match := make(map[string]interface{})
 	if route.Host != "" {
@@ -28,44 +19,44 @@ func BuildHTTPRouteJSON(route CompiledHTTPRoute) (json.RawMessage, error) {
 	// Build handlers
 	var handlers []map[string]interface{}
 
-	// Add strip-prefix rewrite if needed
-	if route.StripPrefix && route.Path != "" && route.Path != "/" {
+	if route.RedirectCode > 0 && route.RedirectURL != "" {
+		// Redirect route: static_response with Location header
 		handlers = append(handlers, map[string]interface{}{
-			"handler":          "rewrite",
-			"strip_path_prefix": route.Path,
+			"handler":     "static_response",
+			"status_code": fmt.Sprintf("%d", route.RedirectCode),
+			"headers": map[string]interface{}{
+				"Location": []string{route.RedirectURL},
+			},
 		})
-	}
+	} else {
+		// Proxy route: reverse_proxy with upstreams
+		upstreams := make([]map[string]interface{}, 0, len(route.Upstreams))
+		for _, u := range route.Upstreams {
+			upstreams = append(upstreams, map[string]interface{}{
+				"dial": u.Address,
+			})
+		}
 
-	// Add reverse proxy handler
-	reverseProxy := map[string]interface{}{
-		"handler":   "reverse_proxy",
-		"upstreams": upstreams,
-		"health_checks": map[string]interface{}{
-			"passive": map[string]interface{}{
-				"fail_duration": "30s",
-			},
-		},
-	}
+		// Add strip-prefix rewrite if needed
+		if route.StripPrefix && route.Path != "" && route.Path != "/" {
+			handlers = append(handlers, map[string]interface{}{
+				"handler":           "rewrite",
+				"strip_path_prefix": route.Path,
+			})
+		}
 
-	// Add TLS transport for Connect direct mode
-	if len(route.TLSCertPEM) > 0 && len(route.TLSKeyPEM) > 0 {
-		tlsConfig := map[string]interface{}{
-			"protocol": "http",
-			"tls": map[string]interface{}{
-				"client_certificate_pem": base64.StdEncoding.EncodeToString(route.TLSCertPEM),
-				"client_certificate_key_pem": base64.StdEncoding.EncodeToString(route.TLSKeyPEM),
-				"insecure_skip_verify": false,
+		reverseProxy := map[string]interface{}{
+			"handler":   "reverse_proxy",
+			"upstreams": upstreams,
+			"health_checks": map[string]interface{}{
+				"passive": map[string]interface{}{
+					"fail_duration": "30s",
+				},
 			},
 		}
-		if len(route.TLSCACertPEM) > 0 {
-			tlsConfig["tls"].(map[string]interface{})["root_ca_pem_files"] = []string{
-				base64.StdEncoding.EncodeToString(route.TLSCACertPEM),
-			}
-		}
-		reverseProxy["transport"] = tlsConfig
-	}
 
-	handlers = append(handlers, reverseProxy)
+		handlers = append(handlers, reverseProxy)
+	}
 
 	// Build route object
 	routeObj := map[string]interface{}{

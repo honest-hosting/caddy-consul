@@ -77,6 +77,19 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 
 		claimed[key] = r
 
+		// Redirect routes don't need upstreams
+		if r.IsRedirect() {
+			compiled = append(compiled, CompiledHTTPRoute{
+				Host:         r.Host,
+				Path:         r.Path,
+				StripPrefix:  r.StripPrefix,
+				ServiceName:  r.ServiceName,
+				RedirectCode: r.RedirectCode,
+				RedirectURL:  r.RedirectURL,
+			})
+			continue
+		}
+
 		// Filter to healthy upstreams only
 		var healthy []Upstream
 		for _, u := range r.Upstreams {

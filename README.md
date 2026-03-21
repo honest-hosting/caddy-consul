@@ -1,6 +1,8 @@
 # Caddy Consul
 
-Dynamic Caddy routing from Consul service registrations. Replaces Fabio as a single ingress layer by driving both HTTP and TCP/TLS routing directly from Consul service catalog and health data.
+Dynamic Caddy routing from Consul service registrations. Replaces Fabio as a single ingress layer by driving both HTTP and TCP/TLS routing directly from Consul service catalog and health data supporting traditional consul services and consul connect with intentions.
+
+**NOTE: This Caddy plugin is NOT a storage engine for Caddy.**
 
 ## Features
 
@@ -8,7 +10,7 @@ Dynamic Caddy routing from Consul service registrations. Replaces Fabio as a sin
 - **HTTP Routing**: Host-based, path-based, wildcard hosts, weighted upstreams, strip-prefix
 - **TCP/TLS Routing**: Port-based, SNI-based, TLS passthrough via caddy-l4
 - **Health-Aware**: Only routes to healthy upstreams (configurable policy)
-- **Consul Connect**: Sidecar proxy integration via Agent API
+- **Consul Connect**: Sidecar proxy integration via Agent API (sidecar mode only)
 - **Fabio Compatible**: Supports `urlprefix-` tags for gradual migration
 - **Zero-Restart**: All routing changes apply dynamically via Caddy Admin API
 - **Conflict Detection**: Static config wins over Consul routes; first-seen wins among duplicates
@@ -79,14 +81,20 @@ Minimal configuration:
         tls_cert /etc/consul/cert.pem
         tls_key /etc/consul/key.pem
 
+        # Skip TLS verification for Consul connection (default: false)
+        insecure_skip_verify false
+
+        # Enable service proxy (default: true). Set to false to disable service discovery.
+        service_proxy_enable true
+
         # Health policy: "passing" (default), "warning", "any"
         health_policy passing
 
         # Conflict policy: "reject" (default), "first-wins"
         conflict_policy reject
 
-        # Connect mode: "sidecar" or "direct" (default: "direct", no mesh)
-        connect_mode direct
+        # Enable connect proxy via sidecar (default: false)
+        connect_proxy_enable false
 
         # Caddy's service identity in the mesh (default: <hostname>-caddy-consul)
         connect_service_name my-ingress
@@ -126,11 +134,60 @@ Services declare routing instructions via Consul service metadata or tags.
 | `caddy-host` | Hostname for HTTP routing or SNI for TLS | _(required for HTTP)_ |
 | `caddy-path` | HTTP path prefix | `/` |
 | `caddy-port` | TCP listener port | _(required for TCP)_ |
-| `caddy-upstream-mode` | `direct`, `connect`, `connect-sidecar`, or `connect-direct` | `direct` (no mesh) |
 | `caddy-priority` | Route priority (higher wins) | `0` |
 | `caddy-weight` | Upstream weight | `1` |
 | `caddy-strip-prefix` | Strip path prefix before forwarding (`true`/`false`) | `false` |
+| `caddy-redirect-code` | HTTP redirect status code (301, 302, etc.) | _(empty = proxy)_ |
+| `caddy-redirect-url` | Redirect target URL (may use `{http.request.uri}`) | _(empty = proxy)_ |
 | `caddy-enabled` | Enable/disable route (`true`/`false`) | `true` |
+
+#### Example: HTTP Redirect
+
+```json
+{
+    "service": {
+        "name": "old-domain",
+        "port": 8080,
+        "meta": {
+            "caddy-host": "old.example.com",
+            "caddy-redirect-code": "301",
+            "caddy-redirect-url": "https://new.example.com{http.request.uri}"
+        }
+    }
+}
+```
+
+Redirect routes return an HTTP redirect response instead of proxying. They work in both service and connect proxy modes. The `{http.request.uri}` placeholder preserves the original request path.
+
+#### Example: Consul Service Tags
+
+Routing can also be configured via Consul service tags (useful for Nomad job definitions or `consul services register` CLI):
+
+```json
+{
+    "service": {
+        "name": "web-app",
+        "port": 8080,
+        "tags": [
+            "urlprefix-app.example.com/"
+        ]
+    }
+}
+```
+
+```json
+{
+    "service": {
+        "name": "old-domain",
+        "port": 8080,
+        "tags": [
+            "urlprefix-old.example.com/ redirect=301,https://new.example.com$path"
+        ]
+    }
+}
+```
+
+Service metadata (`meta`) and Fabio-compatible tags (`urlprefix-`) can be used interchangeably. Metadata takes precedence if both are present.
 
 #### Example: Simple HTTP Service
 
@@ -175,11 +232,15 @@ urlprefix-app.example.com/
 urlprefix-app.example.com/api strip=/api
 urlprefix-:5432 proto=tcp
 urlprefix-secure.example.com/ proto=https
+urlprefix-old.example.com/ redirect=301,https://new.example.com$path
 ```
 
 **Supported modifiers:**
 - `proto=http|https|tcp` (default: `http`)
 - `strip=<path>` (strip path prefix)
+- `redirect=<code>,<url>` (HTTP redirect; `$path` expands to request URI)
+
+**Port handling:** Standard ports (`:80`, `:443`) in the host are stripped automatically (e.g., `urlprefix-host:80/` matches on `host`). Caddy's automatic HTTPS handles HTTP→HTTPS redirects.
 
 If both metadata and Fabio tags exist, metadata takes precedence.
 
@@ -201,64 +262,38 @@ TCP routes automatically create L4 (caddy-l4) servers:
 - Multiple services on the same port are disambiguated by SNI matching
 - TLS passthrough forwards encrypted traffic without termination
 
-### Consul Connect
+### Service Proxy
 
-caddy-consul supports two Connect modes for services in the Consul service mesh.
+The `service_proxy_enable` option controls whether Consul service discovery and routing is active (default: `true`). Set to `false` to disable service discovery entirely — no watcher, no routes.
 
-#### Sidecar Mode (`connect-sidecar`)
+### Connect Proxy
 
-Traffic flows through Caddy's local sidecar proxy:
+By default, Connect proxy is disabled (`connect_proxy_enable false`). Set `connect_proxy_enable true` to enable mesh integration via local sidecar proxies. When Connect proxy is disabled, no Connect components (sidecar resolver, auto-registration) are initialized.
+
+**Note:** Only sidecar mode is supported. The Consul Connect native Go SDK (used for "direct" mTLS) is deprecated by HashiCorp. All connect traffic flows through the local sidecar proxy.
+
+When `connect_proxy_enable` is `true`, all discovered services are routed through sidecar proxies:
 
 ```
 Client → Caddy → localhost:<bind_port> → Caddy's sidecar → mTLS → upstream sidecar → service
 ```
 
-1. Set `caddy-upstream-mode=connect-sidecar` on the upstream service (or `caddy-upstream-mode=connect` with `connect_mode sidecar` globally)
-2. Caddy queries its own sidecar's `Proxy.Upstreams[]` for the target service's local bind port
-3. Traffic is forwarded to `localhost:<bind_port>` — plain TCP
-4. The sidecar handles mTLS, intentions, and cert rotation
+1. Caddy queries its own sidecar's `Proxy.Upstreams[]` for the target service's local bind port
+2. Traffic is forwarded to `localhost:<bind_port>` — plain TCP
+3. The sidecar handles mTLS, intentions, and cert rotation
 
 **Requirements:**
 - Caddy must be registered as a service in Consul with a sidecar proxy (auto-registration handles this by default)
 - The sidecar must have upstream entries for each service Caddy needs to reach
 - A sidecar proxy process must be running (e.g., `consul connect proxy` or Envoy)
 
-#### Direct Mode (`connect-direct`)
-
-Caddy establishes mTLS connections directly:
-
-```
-Client → Caddy → mTLS connection (Caddy presents leaf cert) → upstream sidecar → service
-```
-
-1. Set `caddy-upstream-mode=connect-direct` on the upstream service (or `caddy-upstream-mode=connect` with `connect_mode direct` globally)
-2. Caddy fetches a Connect leaf certificate from Consul for its service identity
-3. Caddy dials the upstream's actual address with mTLS, presenting its leaf cert
-4. The upstream sidecar validates Caddy's identity and checks intentions
-
-**Requirements:**
-- Caddy must be registered as a service in Consul (auto-registration handles this by default)
-- Consul ACL token must have permissions to fetch leaf certs (see [ACL Permissions](#consul-acl-permissions))
-
 #### Connect Identity
 
 Caddy's identity in the mesh is set by `connect_service_name` (default: `<hostname>-caddy-consul`). This is the service name used for:
 - Sidecar proxy registration
-- Leaf certificate requests
 - Intention rules (source identity)
 
 Intentions are written as: `ALLOW <connect_service_name> → <upstream-service>`
-
-#### Upstream Mode Values
-
-| Value | Behavior |
-|-------|----------|
-| `direct` | No mesh — connect directly to service address (default) |
-| `connect` | Use the global `connect_mode` setting (sidecar or direct) |
-| `connect-sidecar` | Force sidecar mode for this service |
-| `connect-direct` | Force direct mTLS mode for this service |
-
-Mixed mode is supported — some services can use sidecar while others use direct within the same Caddy instance.
 
 ## Health-Aware Routing
 
@@ -321,6 +356,7 @@ scrape_configs:
 | `urlprefix-host.com/path` | `caddy-host=host.com`, `caddy-path=/path` |
 | `urlprefix-host.com/api strip=/api` | `caddy-host=host.com`, `caddy-path=/api`, `caddy-strip-prefix=true` |
 | `urlprefix-:5432 proto=tcp` | `caddy-protocol=tcp`, `caddy-port=5432` |
+| `urlprefix-old.com/ redirect=301,https://new.com$path` | `caddy-host=old.com`, `caddy-redirect-code=301`, `caddy-redirect-url=https://new.com{http.request.uri}` |
 
 ### Migration Steps
 
@@ -346,13 +382,6 @@ caddy-consul requires a Consul ACL token with the following permissions. The exa
 | Resource | Permission | API Endpoint | Purpose |
 |----------|-----------|--------------|---------|
 | `service "<connect_service_name>"` | `read` | `/v1/agent/service/<name>-sidecar-proxy` | Read Caddy's sidecar proxy config and upstream bind ports |
-
-### Required for Connect (direct mode)
-
-| Resource | Permission | API Endpoint | Purpose |
-|----------|-----------|--------------|---------|
-| `service "<connect_service_name>"` | `write` | `/v1/agent/connect/ca/leaf/<name>` | Fetch Connect leaf certificates for mTLS identity |
-| `agent ""` | `read` | `/v1/agent/connect/ca/roots` | Fetch Connect CA root certificates |
 
 ### Required for auto-registration (`connect_auto_register true`)
 
@@ -391,10 +420,6 @@ service "my-ingress" {
 
 service "my-ingress-sidecar-proxy" {
   policy = "write"
-}
-
-agent "" {
-  policy = "read"
 }
 ```
 
@@ -437,11 +462,6 @@ This is expected when two services claim the same host/path or port/SNI. The fir
 2. Check the sidecar has upstream entries for the target service: `consul connect proxy-config <connect_service_name>-sidecar-proxy`
 3. Verify intentions allow the connection: `consul intention check <connect_service_name> <target-service>`
 4. Check Caddy logs for `no upstream entry for service` warnings
-
-### Connect direct mode cert errors?
-1. Verify the ACL token has `service:write` for `<connect_service_name>` (required for leaf cert fetch)
-2. Check Caddy logs for `failed to fetch leaf cert` errors
-3. Verify Consul Connect is enabled: `consul connect ca get-config`
 
 ## License
 
