@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -342,7 +343,11 @@ func (r *Reconciler) hashTCPServers(servers map[string][]byte) map[string]string
 // --- Admin API helpers ---
 
 func (r *Reconciler) adminURL(path string) string {
-	return fmt.Sprintf("http://%s%s", r.adminAddr, path)
+	addr := r.adminAddr
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		addr = "http://" + addr
+	}
+	return addr + path
 }
 
 func (r *Reconciler) adminGet(path string) (*http.Response, error) {

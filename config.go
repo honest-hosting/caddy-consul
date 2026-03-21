@@ -24,6 +24,7 @@ const (
 	DefaultDebounce            = "500ms"
 	DefaultConnectAutoRegister = true
 	DefaultMaxConcurrentChecks = 5
+	DefaultCaddyAdminAPI       = "localhost:2019"
 
 	// MaxServiceNameLen is the max length for a Consul service name (DNS label).
 	MaxServiceNameLen = 63
@@ -66,6 +67,7 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    connect_auto_register true
 //	    max_concurrent_checks 5
 //	    debounce 500ms
+//	    caddy_admin_api localhost:2019
 //	    metrics /metrics/consul
 //	}
 func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
@@ -204,6 +206,12 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.DebounceDuration = d.Val()
 
+		case "caddy_admin_api":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.CaddyAdminAPI = d.Val()
+
 		case "metrics":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -265,6 +273,9 @@ func (cr *ConsulRouter) applyDefaults() {
 	}
 	if cr.ConnectAutoRegister == nil {
 		cr.ConnectAutoRegister = boolPtr(DefaultConnectAutoRegister)
+	}
+	if cr.CaddyAdminAPI == "" {
+		cr.CaddyAdminAPI = DefaultCaddyAdminAPI
 	}
 }
 

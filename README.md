@@ -27,18 +27,30 @@ xcaddy build \
 
 ## Configuration
 
-### Environment Variables
+### Configuration Options
 
-Standard Consul environment variables are supported as fallbacks (Caddyfile values override):
+| Option | Description | Default |
+|--------|-------------|---------|
+| `address` | Consul HTTP API address | `127.0.0.1:8500` |
+| `token` | Consul ACL token | _(empty)_ |
+| `scheme` | Consul API scheme (`http` or `https`) | `http` |
+| `datacenter` | Consul datacenter | _(empty, uses agent default)_ |
+| `tls_ca` | Path to CA certificate for Consul TLS | _(empty)_ |
+| `tls_cert` | Path to client certificate for Consul TLS | _(empty)_ |
+| `tls_key` | Path to client key for Consul TLS | _(empty)_ |
+| `insecure_skip_verify` | Skip TLS verification for Consul connection | `false` |
+| `service_proxy_enable` | Enable service discovery and direct routing | `true` |
+| `health_policy` | Health check policy: `passing`, `warning`, `any` | `passing` |
+| `conflict_policy` | Route conflict policy: `reject`, `first-wins` | `reject` |
+| `connect_proxy_enable` | Enable Connect sidecar proxy routing | `false` |
+| `connect_service_name` | Caddy's service identity in the mesh | `<hostname>-caddy-consul` |
+| `connect_auto_register` | Auto-register Caddy in Consul on startup | `true` |
+| `max_concurrent_checks` | Max concurrent Consul health check queries | `5` |
+| `debounce` | Debounce window for rapid Consul changes | `500ms` |
+| `caddy_admin_api` | Caddy admin API address for route reconciliation | `localhost:2019` |
+| `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
 
-| Environment Variable | Description | Default |
-|---------------------|-------------|---------|
-| `CONSUL_HTTP_ADDR` | Consul HTTP API address | `127.0.0.1:8500` |
-| `CONSUL_HTTP_TOKEN` | Consul ACL token | _(empty)_ |
-| `CONSUL_HTTP_SSL` | Enable HTTPS to Consul (`true`/`false`) | `false` |
-| `CONSUL_CACERT` | Path to CA certificate for Consul TLS | _(empty)_ |
-| `CONSUL_CLIENT_CERT` | Path to client certificate for Consul TLS | _(empty)_ |
-| `CONSUL_CLIENT_KEY` | Path to client key for Consul TLS | _(empty)_ |
+Environment variables `CONSUL_HTTP_ADDR`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_SSL`, `CONSUL_CACERT`, `CONSUL_CLIENT_CERT`, and `CONSUL_CLIENT_KEY` are supported as fallbacks when the corresponding option is not set.
 
 ### Quick Start
 
@@ -149,6 +161,7 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "connect_auto_register": true,
       "max_concurrent_checks": 5,
       "debounce_duration": "500ms",
+      "caddy_admin_api": "localhost:2019",
       "metrics": "/metrics/consul"
     },
     "http": {

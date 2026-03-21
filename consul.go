@@ -40,6 +40,9 @@ type ConsulRouter struct {
 	ConnectServiceName  string `json:"connect_service_name,omitempty"`
 	ConnectAutoRegister *bool  `json:"connect_auto_register,omitempty"`
 
+	// Caddy admin API
+	CaddyAdminAPI string `json:"caddy_admin_api,omitempty"`
+
 	// Metrics
 	Metrics string `json:"metrics,omitempty"`
 
@@ -69,7 +72,7 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("caddy-consul: invalid configuration: %w", err)
 	}
 
-	adminAddr := caddy.DefaultAdminListen
+	adminAddr := cr.CaddyAdminAPI
 
 	cr.logger.Info("caddy-consul provisioning",
 		zap.String("address", cr.ConsulAddr),
