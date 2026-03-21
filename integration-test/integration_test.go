@@ -158,17 +158,7 @@ func TestIntegration_MetadataBasedRouting(t *testing.T) {
 	upstreams := getReverseProxyUpstreams(handler)
 	require.NotEmpty(t, upstreams, "should have upstreams")
 
-	// Verify path matcher includes /api*
-	matchList, _ := route["match"].([]interface{})
-	require.NotEmpty(t, matchList)
-	match := matchList[0].(map[string]interface{})
-	paths, _ := match["path"].([]interface{})
-	require.NotEmpty(t, paths)
-	assert.Equal(t, "/api*", paths[0], "path matcher should be /api*")
-
-	// Verify strip-prefix rewrite handler is present
-	handlers, _ := route["handle"].([]interface{})
-	require.GreaterOrEqual(t, len(handlers), 2, "should have rewrite + reverse_proxy handlers")
-	rewrite := handlers[0].(map[string]interface{})
-	assert.Equal(t, "rewrite", rewrite["handler"], "first handler should be rewrite for strip-prefix")
+	// Verify path is /api
+	path, _ := route["Path"].(string)
+	assert.Equal(t, "/api", path, "route path should be /api")
 }

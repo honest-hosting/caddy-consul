@@ -65,14 +65,12 @@ Minimal configuration:
     }
 }
 
-:80 {
-}
-
 :443 {
+    consul_proxy
 }
 ```
 
-**Note:** The Caddy admin API must be enabled. `caddy-consul` uses it for dynamic route reconciliation.
+**Note:** The `consul_proxy` handler must be added to your server block. It dynamically routes HTTP requests based on Consul service discovery. Static routes defined before `consul_proxy` take precedence. The Caddy admin API is only needed for TCP/L4 route management.
 
 ### Complete Caddyfile Example
 
@@ -125,12 +123,15 @@ Minimal configuration:
     }
 }
 
-:80 {
-    # Static routes here (always win over Consul-discovered routes)
-}
-
 :443 {
-    # Static routes here (always win over Consul-discovered routes)
+    # Static routes defined here always win over Consul-discovered routes
+    @admin host admin.internal
+    handle @admin {
+        reverse_proxy localhost:9090
+    }
+
+    # Consul dynamic routing (catch-all for all other hosts)
+    consul_proxy
 }
 ```
 
@@ -168,11 +169,11 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "servers": {
         "srv0": {
           "listen": [":443"],
-          "routes": []
-        },
-        "srv1": {
-          "listen": [":80"],
-          "routes": []
+          "routes": [
+            {
+              "handle": [{"handler": "consul_proxy"}]
+            }
+          ]
         }
       }
     }
@@ -302,16 +303,37 @@ urlprefix-old.example.com/ redirect=301,https://new.example.com$path
 
 If both metadata and Fabio tags exist, metadata takes precedence.
 
+## Architecture
+
+### How `consul_proxy` works
+
+HTTP routing uses an in-memory route table — **no Caddy config reloads** for HTTP route changes:
+
+1. The `consul` app watches Consul for service changes
+2. On change, routes are compiled and the in-memory route table is updated
+3. The `consul_proxy` HTTP handler matches each request against the route table at request time
+4. Static routes defined in your Caddyfile run first (before `consul_proxy`) and always win
+
+TCP routing uses the Caddy admin API to create L4 servers (since new TCP listener ports require config changes). TCP state is persisted across reloads to prevent cascading reload cycles.
+
+### Admin API endpoints
+
+- `GET /consul/metrics` — Prometheus metrics (if enabled)
+- `GET /consul/state` — JSON dump of current state
+- `GET /consul/routes` — JSON dump of in-memory HTTP route table
+
 ## Routing
 
 ### HTTP Routing
 
-HTTP routes are injected into existing Caddy HTTP servers:
-- Routes with `proto=http` target the server listening on `:80`
-- Routes with `proto=https` target the server listening on `:443`
-- Caddy handles automatic HTTPS/ACME cert provisioning for hostnames
-- Websocket connections are proxied transparently
-- Multiple upstreams are load-balanced with optional weights
+The `consul_proxy` handler dynamically routes HTTP requests based on Consul service discovery:
+- Host-based and path-based matching
+- Wildcard hosts (`*.example.com`)
+- Longest path prefix wins
+- Automatic upstream load balancing
+- WebSocket support
+- Strip-prefix rewrite
+- HTTP redirects
 
 ### TCP Routing
 

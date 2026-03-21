@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestConcurrent_CompilerParallel verifies the compiler is safe under concurrent use.
@@ -64,21 +63,10 @@ func TestConcurrent_MetadataParserParallel(t *testing.T) {
 	wg.Wait()
 }
 
-// TestConcurrent_ReconcilerApply verifies that concurrent Apply() calls are
+// TestConcurrent_ReconcilerApplyTCP verifies that concurrent ApplyTCP() calls are
 // serialized by the mutex and don't race on hash map or server name state.
-func TestConcurrent_ReconcilerApply(t *testing.T) {
-	ts := mockCaddyAdmin(map[string]interface{}{
-		"apps": map[string]interface{}{
-			"http": map[string]interface{}{
-				"servers": map[string]interface{}{
-					"srv0": map[string]interface{}{
-						"listen": []interface{}{":80"},
-						"routes": []interface{}{},
-					},
-				},
-			},
-		},
-	})
+func TestConcurrent_ReconcilerApplyTCP(t *testing.T) {
+	ts := mockCaddyAdmin(nil)
 	defer ts.Close()
 
 	rec := NewReconciler(testLogger(), ts.Listener.Addr().String())
@@ -89,18 +77,51 @@ func TestConcurrent_ReconcilerApply(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			compiled := &CompiledConfig{
-				HTTPRoutes: []CompiledHTTPRoute{
+				TCPRoutes: []CompiledTCPRoute{
 					{
-						Host:        fmt.Sprintf("svc-%d.example.com", n),
-						ServiceName: fmt.Sprintf("svc-%d", n),
-						Upstreams:   []Upstream{{Address: fmt.Sprintf("10.0.0.%d:8080", n%256)}},
+						Port:        5000 + n,
+						ServiceName: fmt.Sprintf("tcp-svc-%d", n),
+						Upstreams:   []Upstream{{Address: fmt.Sprintf("10.0.0.%d:5432", n%256)}},
 					},
 				},
 			}
-			// Errors are acceptable (concurrent PATCH may conflict), but no panics or races
-			_ = rec.Apply(compiled)
+			_ = rec.ApplyTCP(compiled)
 		}(i)
 	}
+	wg.Wait()
+}
+
+// TestConcurrent_RouteTableUpdateMatch verifies that concurrent Update and Match
+// calls on the RouteTable don't race.
+func TestConcurrent_RouteTableUpdateMatch(t *testing.T) {
+	rt := NewRouteTable()
+
+	var wg sync.WaitGroup
+
+	// Writers
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				rt.Update([]CompiledHTTPRoute{
+					{Host: fmt.Sprintf("svc-%d.example.com", n), Path: "/", ServiceName: fmt.Sprintf("svc-%d", n)},
+				})
+			}
+		}(i)
+	}
+
+	// Readers
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = rt.Match("svc-0.example.com", "/")
+			}
+		}()
+	}
+
 	wg.Wait()
 }
 
@@ -377,37 +398,22 @@ func BenchmarkServiceStateClone(b *testing.B) {
 	}
 }
 
-// BenchmarkReconcilerApply benchmarks a full reconciliation cycle against a mock admin API.
-func BenchmarkReconcilerApply(b *testing.B) {
-	ts := mockCaddyAdmin(map[string]interface{}{
-		"apps": map[string]interface{}{
-			"http": map[string]interface{}{
-				"servers": map[string]interface{}{
-					"srv0": map[string]interface{}{
-						"listen": []interface{}{":80"},
-						"routes": []interface{}{},
-					},
-				},
-			},
-		},
-	})
-	defer ts.Close()
-
-	rec := NewReconciler(testLogger(), ts.Listener.Addr().String())
-
-	compiled := &CompiledConfig{
-		HTTPRoutes: []CompiledHTTPRoute{
-			{Host: "a.example.com", ServiceName: "svc-a", Upstreams: []Upstream{{Address: "10.0.0.1:8080"}}},
-			{Host: "b.example.com", ServiceName: "svc-b", Upstreams: []Upstream{{Address: "10.0.0.2:8080"}}},
-			{Host: "c.example.com", ServiceName: "svc-c", Upstreams: []Upstream{{Address: "10.0.0.3:8080"}}},
-		},
+// BenchmarkRouteTableMatch benchmarks route table matching performance.
+func BenchmarkRouteTableMatch(b *testing.B) {
+	rt := NewRouteTable()
+	routes := make([]CompiledHTTPRoute, 100)
+	for i := range routes {
+		routes[i] = CompiledHTTPRoute{
+			Host:        fmt.Sprintf("svc-%d.example.com", i),
+			Path:        "/",
+			ServiceName: fmt.Sprintf("svc-%d", i),
+			Upstreams:   []Upstream{{Address: fmt.Sprintf("10.0.0.%d:8080", i%256), Healthy: true}},
+		}
 	}
-
-	// Prime the reconciler
-	require.NoError(b, rec.Apply(compiled))
+	rt.Update(routes)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = rec.Apply(compiled)
+		rt.Match("svc-50.example.com", "/api/test")
 	}
 }

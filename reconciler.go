@@ -21,16 +21,13 @@ const (
 	adminReadyBaseDelay    = 500 * time.Millisecond
 )
 
-// Reconciler applies compiled routes to Caddy's running config via the Admin API.
+// Reconciler applies compiled TCP routes to Caddy's running config via the Admin API.
+// HTTP routes are handled in-memory by the consul_proxy handler and do NOT use this.
 //
-// It uses targeted PATCH operations on specific config paths (e.g.,
-// /config/apps/http/servers/srv0/routes) rather than POST /load, which would
-// replace the entire config and re-provision all apps — including the consul app
-// itself, causing a restart loop.
-//
-// Ownership tracking: routes we inject are tracked by content hash. On each
-// reconciliation we read the live routes, remove ours (by hash match), append
-// the new set, and PATCH back.
+// TCP routes require the admin API because new listeners (ports) cannot be created
+// without a config change. TCP route changes are infrequent (only when TCP services
+// are added/removed). TCP state is persisted across reloads to prevent cascading
+// reload cycles.
 type Reconciler struct {
 	logger     *zap.Logger
 	adminAddr  string
@@ -39,31 +36,56 @@ type Reconciler struct {
 	adminReady atomic.Bool
 	maxRetries int
 
-	// ownedHTTPRouteHashes tracks content hashes of HTTP routes we previously injected.
-	ownedHTTPRouteHashes map[string]bool
-
 	// ownedTCPServerNames tracks L4 server names we previously created (consul_tcp_<port>).
 	ownedTCPServerNames map[string]bool
 
 	// lastTCPServerHashes tracks hashes of TCP server configs we last applied.
 	lastTCPServerHashes map[string]string
-
-	// httpServerName is the Caddy HTTP server we inject routes into, discovered on first apply.
-	httpServerName string
 }
 
 // NewReconciler creates a new Reconciler targeting the given Caddy admin address.
 func NewReconciler(logger *zap.Logger, adminAddr string) *Reconciler {
 	return &Reconciler{
-		logger:               logger,
-		adminAddr:            adminAddr,
-		maxRetries:           defaultAdminMaxRetries,
-		ownedHTTPRouteHashes: make(map[string]bool),
-		ownedTCPServerNames:  make(map[string]bool),
+		logger:              logger,
+		adminAddr:           adminAddr,
+		maxRetries:          defaultAdminMaxRetries,
+		ownedTCPServerNames: make(map[string]bool),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
 	}
+}
+
+// RestoreTCPState restores TCP reconciler state from a previous reload cycle.
+// This prevents the reconciler from re-applying identical TCP servers and
+// triggering another unnecessary config reload.
+func (r *Reconciler) RestoreTCPState(hashes map[string]string, names []string) {
+	if len(hashes) > 0 {
+		r.lastTCPServerHashes = hashes
+	}
+	if len(names) > 0 {
+		r.ownedTCPServerNames = make(map[string]bool, len(names))
+		for _, name := range names {
+			r.ownedTCPServerNames[name] = true
+		}
+	}
+}
+
+// TCPState returns the current TCP state for persistence across reloads.
+func (r *Reconciler) TCPState() (hashes map[string]string, names []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	hashes = make(map[string]string, len(r.lastTCPServerHashes))
+	for k, v := range r.lastTCPServerHashes {
+		hashes[k] = v
+	}
+
+	names = make([]string, 0, len(r.ownedTCPServerNames))
+	for name := range r.ownedTCPServerNames {
+		names = append(names, name)
+	}
+	return
 }
 
 // waitForAdminAPI waits for the Caddy admin API to become reachable.
@@ -116,10 +138,9 @@ func (r *Reconciler) pingAdmin() error {
 	return nil
 }
 
-// Apply reconciles the compiled routes with Caddy's live config using
-// targeted PATCH operations. This avoids replacing the entire config
-// (which would re-provision the consul app and cause a restart loop).
-func (r *Reconciler) Apply(compiled *CompiledConfig) error {
+// ApplyTCP reconciles TCP routes with Caddy's live L4 config via the admin API.
+// HTTP routes are handled in-memory by the consul_proxy handler and do not use this.
+func (r *Reconciler) ApplyTCP(compiled *CompiledConfig) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -129,138 +150,15 @@ func (r *Reconciler) Apply(compiled *CompiledConfig) error {
 
 	start := time.Now()
 
-	// Discover the HTTP server name on first call
-	if r.httpServerName == "" {
-		name, err := r.discoverHTTPServer()
-		if err != nil {
-			return fmt.Errorf("failed to discover HTTP server: %w", err)
-		}
-		r.httpServerName = name
-		r.logger.Info("discovered HTTP server for route injection",
-			zap.String("server", name),
-		)
-	}
-
-	// Reconcile HTTP routes
-	if err := r.reconcileHTTPRoutes(compiled.HTTPRoutes); err != nil {
-		return fmt.Errorf("failed to reconcile HTTP routes: %w", err)
-	}
-
-	// Reconcile TCP routes
 	if err := r.reconcileTCPRoutes(compiled.TCPRoutes); err != nil {
 		return fmt.Errorf("failed to reconcile TCP routes: %w", err)
 	}
 
-	r.logger.Info("routes reconciled successfully",
-		zap.Int("http_routes", len(compiled.HTTPRoutes)),
+	r.logger.Info("TCP routes reconciled",
 		zap.Int("tcp_routes", len(compiled.TCPRoutes)),
-		zap.Int("conflicts", len(compiled.Conflicts)),
 		zap.Duration("duration", time.Since(start)),
 	)
 
-	return nil
-}
-
-// discoverHTTPServer finds the first HTTP server listening on :80 or :443.
-func (r *Reconciler) discoverHTTPServer() (string, error) {
-	resp, err := r.adminGet("/config/apps/http/servers")
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GET /config/apps/http/servers returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var servers map[string]json.RawMessage
-	if err := json.Unmarshal(body, &servers); err != nil {
-		return "", fmt.Errorf("failed to parse servers: %w", err)
-	}
-
-	// Prefer server listening on common ports
-	var firstName string
-	for name, raw := range servers {
-		if firstName == "" {
-			firstName = name
-		}
-		var srv struct {
-			Listen []string `json:"listen"`
-		}
-		if err := json.Unmarshal(raw, &srv); err != nil {
-			continue
-		}
-		for _, addr := range srv.Listen {
-			if addr == ":80" || addr == ":443" || addr == ":8080" || addr == ":8443" {
-				return name, nil
-			}
-		}
-	}
-
-	if firstName != "" {
-		return firstName, nil
-	}
-
-	return "", fmt.Errorf("no HTTP servers found in Caddy config")
-}
-
-// reconcileHTTPRoutes reads the live routes, removes our old ones, appends new ones,
-// and PATCHes the routes array back. Skips the PATCH if nothing changed.
-func (r *Reconciler) reconcileHTTPRoutes(routes []CompiledHTTPRoute) error {
-	routesPath := fmt.Sprintf("/config/apps/http/servers/%s/routes", r.httpServerName)
-
-	// Read current routes
-	liveRoutes, err := r.readJSONArray(routesPath)
-	if err != nil {
-		return fmt.Errorf("failed to read live routes: %w", err)
-	}
-
-	// Hash the live state before changes
-	liveHash := hashInterface(liveRoutes)
-
-	// Remove routes we previously injected (by hash)
-	var kept []interface{}
-	for _, route := range liveRoutes {
-		h := hashInterface(route)
-		if r.ownedHTTPRouteHashes[h] {
-			continue
-		}
-		kept = append(kept, route)
-	}
-
-	// Build and append new consul routes
-	newHashes := make(map[string]bool)
-	for _, route := range routes {
-		routeJSON, err := BuildHTTPRouteJSON(route)
-		if err != nil {
-			return err
-		}
-		var routeMap interface{}
-		if err := json.Unmarshal(routeJSON, &routeMap); err != nil {
-			return err
-		}
-		kept = append(kept, routeMap)
-		newHashes[hashJSON(routeJSON)] = true
-	}
-
-	// Skip PATCH if nothing changed — avoids triggering a Caddy config reload
-	newHash := hashInterface(kept)
-	if liveHash == newHash {
-		r.logger.Debug("HTTP routes unchanged, skipping PATCH")
-		r.ownedHTTPRouteHashes = newHashes
-		return nil
-	}
-
-	if err := r.patchJSON(routesPath, kept); err != nil {
-		return fmt.Errorf("failed to PATCH routes: %w", err)
-	}
-
-	r.ownedHTTPRouteHashes = newHashes
 	return nil
 }
 
@@ -415,31 +313,6 @@ func (r *Reconciler) putJSON(path string, data []byte) error {
 		return fmt.Errorf("PUT %s returned %d: %s", path, resp.StatusCode, string(body))
 	}
 	return nil
-}
-
-// readJSONArray reads a JSON array from a config path.
-func (r *Reconciler) readJSONArray(path string) ([]interface{}, error) {
-	resp, err := r.adminGet(path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s returned %d: %s", path, resp.StatusCode, string(body))
-	}
-
-	var arr []interface{}
-	if err := json.Unmarshal(body, &arr); err != nil {
-		return nil, fmt.Errorf("failed to parse array at %s: %w", path, err)
-	}
-
-	return arr, nil
 }
 
 // ensureConfigPath ensures a config path exists by attempting to create it.

@@ -3,10 +3,15 @@ package caddyconsul
 import (
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
 )
+
+// globalRouteTable holds a reference to the active RouteTable for the admin API.
+// Set by ConsulRouter on Provision.
+var globalRouteTable atomic.Value
 
 func init() {
 	caddy.RegisterModule(AdminConsul{})
@@ -45,6 +50,10 @@ func (ac *AdminConsul) Routes() []caddy.AdminRoute {
 		{
 			Pattern: "/consul/state",
 			Handler: caddy.AdminHandlerFunc(ac.serveState),
+		},
+		{
+			Pattern: "/consul/routes",
+			Handler: caddy.AdminHandlerFunc(ac.serveRoutes),
 		},
 	}
 }
@@ -86,6 +95,27 @@ func (ac *AdminConsul) serveState(w http.ResponseWriter, r *http.Request) error 
 
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(state)
+}
+
+// serveRoutes serves a JSON dump of the current in-memory HTTP route table.
+func (ac *AdminConsul) serveRoutes(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodGet {
+		return caddy.APIError{
+			HTTPStatus: http.StatusMethodNotAllowed,
+			Message:    "method not allowed",
+		}
+	}
+
+	rt := globalRouteTable.Load()
+	if rt == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+		return nil
+	}
+
+	routes := rt.(*RouteTable).Routes()
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(routes)
 }
 
 // Cleanup cleans up the admin handler.

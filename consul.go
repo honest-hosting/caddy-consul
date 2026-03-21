@@ -2,6 +2,7 @@ package caddyconsul
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
@@ -46,12 +47,23 @@ type ConsulRouter struct {
 	// Metrics
 	Metrics string `json:"metrics,omitempty"`
 
+	// TCP state persisted across config reloads (prevents cascading L4 reloads)
+	LastTCPServerHashes map[string]string `json:"last_tcp_server_hashes,omitempty"`
+	OwnedTCPServerNames []string         `json:"owned_tcp_server_names,omitempty"`
+
 	// Internal (not serialized)
 	watcher             *ConsulWatcher       `json:"-"`
 	compiler            *RouteCompiler       `json:"-"`
 	reconciler          *Reconciler          `json:"-"`
+	routeTable          *RouteTable          `json:"-"`
 	sidecarResolver     *SidecarResolver     `json:"-"`
 	registrar           *ServiceRegistrar    `json:"-"`
+	sidecarWarnOnce     *sync.Once           `json:"-"`
+}
+
+// RouteTable returns the shared route table for the consul_proxy handler.
+func (cr *ConsulRouter) RouteTable() *RouteTable {
+	return cr.routeTable
 }
 
 // CaddyModule returns the Caddy module information.
@@ -96,7 +108,12 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 	// Service discovery components
 	if boolVal(cr.ServiceProxyEnable) || boolVal(cr.ConnectProxyEnable) {
 		cr.compiler = NewRouteCompiler(cr.logger)
+		cr.routeTable = NewRouteTable()
+		globalRouteTable.Store(cr.routeTable)
+
+		// Initialize reconciler for TCP routes (with persisted state from prior reload)
 		cr.reconciler = NewReconciler(cr.logger, adminAddr)
+		cr.reconciler.RestoreTCPState(cr.LastTCPServerHashes, cr.OwnedTCPServerNames)
 
 		cr.watcher = NewConsulWatcher(
 			consulClient,
@@ -111,9 +128,20 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 	// Connect components
 	if boolVal(cr.ConnectProxyEnable) {
 		cr.sidecarResolver = NewSidecarResolver(consulClient, cr.logger, cr.ConnectServiceName)
+		cr.sidecarWarnOnce = &sync.Once{}
 
 		if boolVal(cr.ConnectAutoRegister) {
 			cr.registrar = NewServiceRegistrar(consulClient, cr.logger, cr.ConnectServiceName)
+		}
+
+		// Warn if the sidecar proxy is not registered — connect routing won't work without it
+		proxyID := cr.ConnectServiceName + "-sidecar-proxy"
+		if _, _, err := consulClient.Agent().Service(proxyID, nil); err != nil {
+			cr.logger.Warn("connect_proxy_enable is true but sidecar proxy not found — connect routing will not work until a sidecar proxy is running",
+				zap.String("expected_sidecar", proxyID),
+				zap.String("hint", "run: consul connect envoy -sidecar-for "+cr.ConnectServiceName),
+				zap.Error(err),
+			)
 		}
 	}
 
@@ -190,6 +218,14 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 				if err := cr.sidecarResolver.ResolveUpstreams(&routes[i]); err == nil {
 					routes[i].UpstreamMode = UpstreamConnectSidecar
 					continue
+				} else {
+					// Warn once that connect proxy isn't working (avoid log spam)
+					cr.sidecarWarnOnce.Do(func() {
+						cr.logger.Warn("connect_proxy_enable is true but sidecar resolution is failing — falling back to direct routing. Ensure a sidecar proxy is running.",
+							zap.String("hint", "run: consul connect envoy -sidecar-for "+cr.ConnectServiceName),
+							zap.Error(err),
+						)
+					})
 				}
 				// Sidecar resolution failed — fall through to direct if enabled
 			}
@@ -208,6 +244,32 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		allRoutes = append(allRoutes, routes...)
 	}
 
+	// Log route summary before compilation
+	var directCount, sidecarCount, redirectCount, totalHealthy int
+	for i := range allRoutes {
+		switch {
+		case allRoutes[i].IsRedirect():
+			redirectCount++
+		case allRoutes[i].UpstreamMode == UpstreamConnectSidecar:
+			sidecarCount++
+		default:
+			directCount++
+		}
+		for _, u := range allRoutes[i].Upstreams {
+			if u.Healthy {
+				totalHealthy++
+			}
+		}
+	}
+	cr.logger.Info("applying route changes",
+		zap.Int("total_services", len(allServices)),
+		zap.Int("routable_services", len(allRoutes)),
+		zap.Int("direct_routes", directCount),
+		zap.Int("connect_routes", sidecarCount),
+		zap.Int("redirect_routes", redirectCount),
+		zap.Int("healthy_upstreams", totalHealthy),
+	)
+
 	// Compile routes
 	compiled := cr.compiler.Compile(allRoutes)
 
@@ -221,11 +283,24 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		)
 	}
 
-	// Apply to Caddy via admin API
-	if err := cr.reconciler.Apply(compiled); err != nil {
-		cr.logger.Error("failed to reconcile routes",
-			zap.Error(err),
-		)
+	// Update HTTP routes in-memory (no admin API, no config reload)
+	cr.routeTable.Update(compiled.HTTPRoutes)
+	cr.logger.Info("HTTP routes updated in-memory",
+		zap.Int("routes", len(compiled.HTTPRoutes)),
+	)
+
+	// Reconcile TCP routes via admin API (infrequent, acceptable reload)
+	if len(compiled.TCPRoutes) > 0 || len(cr.OwnedTCPServerNames) > 0 {
+		tcpConfig := &CompiledConfig{
+			TCPRoutes: compiled.TCPRoutes,
+		}
+		if err := cr.reconciler.ApplyTCP(tcpConfig); err != nil {
+			cr.logger.Error("failed to reconcile TCP routes",
+				zap.Error(err),
+			)
+		}
+		// Persist TCP state for reload survival
+		cr.LastTCPServerHashes, cr.OwnedTCPServerNames = cr.reconciler.TCPState()
 	}
 }
 

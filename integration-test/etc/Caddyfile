@@ -24,5 +24,13 @@ http://caddy.localdev {
 # HTTPS with wildcard internal cert for *.localdev
 *.localdev {
 	tls internal
-	respond "caddy-consul integration test h2h3" 200
+
+	# Static response for direct *.localdev hits (terminal — wins over consul_proxy)
+	@static_test host caddy.localdev
+	handle @static_test {
+		respond "caddy-consul integration test h2h3" 200
+	}
+
+	# Consul dynamic routing for all other *.localdev hosts
+	consul_proxy
 }

@@ -296,98 +296,138 @@ func getCaddyConfig() (map[string]interface{}, error) {
 	return config, nil
 }
 
-// --- Caddy config inspection helpers ---
+// --- Consul route table inspection helpers ---
 
-// getCaddyHTTPRoutes returns routes from ALL HTTP servers in Caddy's config.
-func getCaddyHTTPRoutes() ([]map[string]interface{}, error) {
-	config, err := getCaddyConfig()
+// consulRouteEntry represents a route from the /consul/routes admin endpoint.
+type consulRouteEntry struct {
+	Host         string `json:"Host"`
+	Path         string `json:"Path"`
+	ServiceName  string `json:"ServiceName"`
+	StripPrefix  bool   `json:"StripPrefix"`
+	RedirectCode int    `json:"RedirectCode"`
+	RedirectURL  string `json:"RedirectURL"`
+	Upstreams    []struct {
+		Address string `json:"Address"`
+		Weight  int    `json:"Weight"`
+		Healthy bool   `json:"Healthy"`
+	} `json:"Upstreams"`
+}
+
+// getConsulRoutes fetches the in-memory route table from the /consul/routes admin endpoint.
+func getConsulRoutes() ([]consulRouteEntry, error) {
+	url := fmt.Sprintf("http://%s/consul/routes", caddyAdmin)
+	resp, err := http.Get(url) //nolint:noctx // test helper
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	apps, _ := config["apps"].(map[string]interface{})
-	if apps == nil {
-		return nil, fmt.Errorf("no apps in config")
+	var routes []consulRouteEntry
+	if err := json.Unmarshal(body, &routes); err != nil {
+		return nil, err
 	}
-	httpApp, _ := apps["http"].(map[string]interface{})
-	if httpApp == nil {
-		return nil, fmt.Errorf("no http app in config")
-	}
-	servers, _ := httpApp["servers"].(map[string]interface{})
-	if servers == nil {
-		return nil, fmt.Errorf("no servers in http app")
-	}
-
-	// Collect routes from ALL servers
-	var allRoutes []map[string]interface{}
-	for _, srv := range servers {
-		srvMap, _ := srv.(map[string]interface{})
-		if srvMap == nil {
-			continue
-		}
-		routesRaw, _ := srvMap["routes"].([]interface{})
-		for _, r := range routesRaw {
-			if rm, ok := r.(map[string]interface{}); ok {
-				allRoutes = append(allRoutes, rm)
-			}
-		}
-	}
-
-	if len(allRoutes) == 0 {
-		return nil, fmt.Errorf("no routes found in any HTTP server")
-	}
-
-	return allRoutes, nil
+	return routes, nil
 }
 
-// findHTTPRouteByHost searches Caddy's HTTP routes for one matching the given host.
-// Returns the route map and true if found.
+// findHTTPRouteByHost searches the in-memory consul route table for a route matching the given host.
+// Returns the route as a map (for compatibility with existing tests) and true if found.
 func findHTTPRouteByHost(host string) (map[string]interface{}, bool) {
-	routes, err := getCaddyHTTPRoutes()
+	routes, err := getConsulRoutes()
 	if err != nil {
 		return nil, false
 	}
 
-	for _, route := range routes {
-		matchList, _ := route["match"].([]interface{})
-		for _, m := range matchList {
-			match, _ := m.(map[string]interface{})
-			hosts, _ := match["host"].([]interface{})
-			for _, h := range hosts {
-				if h == host {
-					return route, true
-				}
+	for _, r := range routes {
+		if r.Host == host {
+			// Convert to map for backward compatibility with existing test helpers
+			result := map[string]interface{}{
+				"Host":         r.Host,
+				"Path":         r.Path,
+				"ServiceName":  r.ServiceName,
+				"RedirectCode": float64(r.RedirectCode),
+				"RedirectURL":  r.RedirectURL,
 			}
+			if len(r.Upstreams) > 0 {
+				var upstreams []interface{}
+				for _, u := range r.Upstreams {
+					upstreams = append(upstreams, map[string]interface{}{
+						"Address": u.Address,
+						"Healthy": u.Healthy,
+					})
+				}
+				result["Upstreams"] = upstreams
+			}
+			return result, true
 		}
 	}
 	return nil, false
 }
 
-// getReverseProxyHandler extracts the reverse_proxy handler from a route.
+// isProxyRoute checks if a route from the consul route table is a proxy route (not a redirect).
+func isProxyRoute(route map[string]interface{}) bool {
+	code, _ := route["RedirectCode"].(float64)
+	return code == 0
+}
+
+// isRedirectRoute checks if a route from the consul route table is a redirect route.
+func isRedirectRoute(route map[string]interface{}) bool {
+	code, _ := route["RedirectCode"].(float64)
+	return code > 0
+}
+
+// getRouteRedirectCode returns the redirect status code from a consul route.
+func getRouteRedirectCode(route map[string]interface{}) int {
+	code, _ := route["RedirectCode"].(float64)
+	return int(code)
+}
+
+// getRouteRedirectURL returns the redirect URL from a consul route.
+func getRouteRedirectURL(route map[string]interface{}) string {
+	url, _ := route["RedirectURL"].(string)
+	return url
+}
+
+// getRouteUpstreams extracts upstream addresses from a consul route.
+func getRouteUpstreams(route map[string]interface{}) []string {
+	upstreamsRaw, _ := route["Upstreams"].([]interface{})
+	var addrs []string
+	for _, u := range upstreamsRaw {
+		um, _ := u.(map[string]interface{})
+		if addr, ok := um["Address"].(string); ok {
+			addrs = append(addrs, addr)
+		}
+	}
+	return addrs
+}
+
+// Backward-compatible aliases for tests that use the old helper names.
 func getReverseProxyHandler(route map[string]interface{}) (map[string]interface{}, bool) {
-	handlers, _ := route["handle"].([]interface{})
-	for _, h := range handlers {
-		hm, _ := h.(map[string]interface{})
-		if hm["handler"] == "reverse_proxy" {
-			return hm, true
-		}
+	if isProxyRoute(route) && len(getRouteUpstreams(route)) > 0 {
+		return route, true
 	}
 	return nil, false
 }
 
-// getStaticResponseHandler extracts the static_response handler from a route.
 func getStaticResponseHandler(route map[string]interface{}) (map[string]interface{}, bool) {
-	handlers, _ := route["handle"].([]interface{})
-	for _, h := range handlers {
-		hm, _ := h.(map[string]interface{})
-		if hm["handler"] == "static_response" {
-			return hm, true
+	if isRedirectRoute(route) {
+		// Return a map that mimics the old static_response handler format
+		result := map[string]interface{}{
+			"handler":     "static_response",
+			"status_code": fmt.Sprintf("%d", getRouteRedirectCode(route)),
+			"headers": map[string]interface{}{
+				"Location": []interface{}{getRouteRedirectURL(route)},
+			},
 		}
+		return result, true
 	}
 	return nil, false
 }
 
-// getStaticResponseLocation extracts the Location header from a static_response handler.
 func getStaticResponseLocation(handler map[string]interface{}) string {
 	headers, _ := handler["headers"].(map[string]interface{})
 	if headers == nil {
@@ -401,27 +441,12 @@ func getStaticResponseLocation(handler map[string]interface{}) string {
 	return loc
 }
 
-// reverseProxyHasTLSTransport checks if a reverse_proxy handler has a TLS transport configured.
-func reverseProxyHasTLSTransport(handler map[string]interface{}) bool {
-	transport, _ := handler["transport"].(map[string]interface{})
-	if transport == nil {
-		return false
-	}
-	tls, _ := transport["tls"].(map[string]interface{})
-	return tls != nil
+func reverseProxyHasTLSTransport(_ map[string]interface{}) bool {
+	return false // in-memory routes don't have TLS transport config
 }
 
-// getReverseProxyUpstreams extracts the upstream dial addresses from a reverse_proxy handler.
-func getReverseProxyUpstreams(handler map[string]interface{}) []string {
-	upstreamsRaw, _ := handler["upstreams"].([]interface{})
-	var addrs []string
-	for _, u := range upstreamsRaw {
-		um, _ := u.(map[string]interface{})
-		if dial, ok := um["dial"].(string); ok {
-			addrs = append(addrs, dial)
-		}
-	}
-	return addrs
+func getReverseProxyUpstreams(route map[string]interface{}) []string {
+	return getRouteUpstreams(route)
 }
 
 // waitForHTTPRoute polls Caddy config until a route matching the host appears.

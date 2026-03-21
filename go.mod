@@ -3,7 +3,7 @@ module github.com/honest-hosting/caddy-consul
 go 1.25.0
 
 require (
-	github.com/caddyserver/caddy/v2 v2.11.1
+	github.com/caddyserver/caddy/v2 v2.11.2
 	github.com/hashicorp/consul/api v1.17.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/quic-go/quic-go v0.59.0
