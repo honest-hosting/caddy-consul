@@ -133,7 +133,7 @@ func TestIntegration_MetadataBasedRouting(t *testing.T) {
 	require.NoError(t, err)
 
 	err = registerService(client, "meta-svc", "echo-http", 8080,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-protocol":     "http",
 			"caddy-host":         "meta.localdev",

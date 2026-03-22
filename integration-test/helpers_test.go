@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	consul "github.com/hashicorp/consul/api"
@@ -125,12 +126,22 @@ func deregisterService(client *consul.Client, name string) error {
 }
 
 // registerConnectService registers a service with Connect sidecar enabled.
+// If metadata with caddy-* keys is provided, the "caddy-consul" sentinel tag
+// is added automatically for catalog-level discovery.
 func registerConnectService(client *consul.Client, name, address string, port int, meta map[string]string) error {
+	var tags []string
+	for k := range meta {
+		if strings.HasPrefix(k, "caddy-") {
+			tags = []string{"caddy-consul"}
+			break
+		}
+	}
 	reg := &consul.AgentServiceRegistration{
 		ID:      name,
 		Name:    name,
 		Address: address,
 		Port:    port,
+		Tags:    tags,
 		Meta:    meta,
 		Connect: &consul.AgentServiceConnect{
 			SidecarService: &consul.AgentServiceRegistration{},
@@ -237,9 +248,10 @@ func registerTCPService(client *consul.Client, name, address string, servicePort
 }
 
 // registerTCPServiceMeta registers a TCP service using caddy-* metadata.
+// Includes the "caddy-consul" sentinel tag required for catalog-level discovery.
 func registerTCPServiceMeta(client *consul.Client, name, address string, servicePort, listenPort int) error {
 	return registerService(client, name, address, servicePort,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-protocol": "tcp",
 			"caddy-port":     fmt.Sprintf("%d", listenPort),

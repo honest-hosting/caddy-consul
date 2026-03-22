@@ -126,6 +126,12 @@ func (w *ConsulWatcher) Stop() {
 func (w *ConsulWatcher) watchCatalog() {
 	backoff := time.Second
 
+	// On first iteration after restore, use WaitIndex=0 to force a fresh
+	// catalog fetch. This ensures reconcileServices runs immediately and
+	// starts health watchers for restored services, rather than waiting
+	// up to 5 minutes for a catalog change that may never come.
+	firstQuery := true
+
 	for {
 		select {
 		case <-w.stopCh:
@@ -133,8 +139,16 @@ func (w *ConsulWatcher) watchCatalog() {
 		default:
 		}
 
+		waitIndex := w.catalogIndex
+		if firstQuery {
+			// Force a non-blocking fetch on first query to ensure
+			// reconcileServices runs immediately and starts health watchers.
+			waitIndex = 0
+			firstQuery = false
+		}
+
 		opts := &consul.QueryOptions{
-			WaitIndex: w.catalogIndex,
+			WaitIndex: waitIndex,
 			WaitTime:  5 * time.Minute,
 		}
 
@@ -194,18 +208,21 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 		)
 	}
 
-	// Start watchers for new or restored services
+	// Start watchers for new or restored services.
+	// Only watch services that signal routing config via tags:
+	//   - "urlprefix-*" (Fabio compatibility)
+	//   - "caddy-consul" (sentinel tag for metadata-based routing)
+	// Services with no tags at all are also watched (they might be legacy).
 	var skippedNoRouting int
 	for name := range currentNames {
 		catalogTags := catalogServices[name]
 
-		if _, exists := w.services[name]; !exists {
-			// Skip services with no routing config visible in catalog tags.
-			if len(catalogTags) > 0 && !hasRoutingTags(catalogTags) {
-				skippedNoRouting++
-				continue
-			}
+		if len(catalogTags) > 0 && !hasCaddyRoutingTag(catalogTags) {
+			skippedNoRouting++
+			continue
+		}
 
+		if _, exists := w.services[name]; !exists {
 			w.logger.Debug("new service discovered", zap.String("service", name))
 			w.services[name] = &ServiceState{
 				Name: name,
@@ -220,10 +237,6 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 			w.serviceStopMu.Unlock()
 
 			if !hasWatcher {
-				// Skip services without routing tags (same filter as new services)
-				if len(catalogTags) > 0 && !hasRoutingTags(catalogTags) {
-					continue
-				}
 				w.startServiceWatch(name)
 			}
 		}
@@ -445,18 +458,22 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 	}
 }
 
-// hasRoutingTags returns true if any tag indicates routing config.
-// Checks for urlprefix- tags (Fabio) or caddy-host/caddy-protocol/caddy-route-N-* tags (native).
-// Generic "caddy-" prefixed tags that aren't routing keys are ignored.
-func hasRoutingTags(tags []string) bool {
+
+
+// hasCaddyRoutingTag returns true if any tag signals routing config:
+//   - "urlprefix-*" (Fabio-compatible routing)
+//   - "caddy-consul" (sentinel tag indicating metadata-based routing config)
+func hasCaddyRoutingTag(tags []string) bool {
 	for _, tag := range tags {
 		if strings.HasPrefix(tag, "urlprefix-") {
+			return true
+		}
+		if tag == "caddy-consul" {
 			return true
 		}
 	}
 	return false
 }
-
 
 // isHealthy determines if a service entry is healthy based on the health policy.
 func (w *ConsulWatcher) isHealthy(entry *consul.ServiceEntry) bool {

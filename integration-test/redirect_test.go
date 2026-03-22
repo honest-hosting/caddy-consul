@@ -44,7 +44,7 @@ func TestIntegration_Redirect_NativeMetadata(t *testing.T) {
 	require.NoError(t, err)
 
 	err = registerService(client, "meta-redir", "echo-connect", 8080,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-host":          "old-meta.localdev",
 			"caddy-redirect-code": "301",
@@ -74,7 +74,7 @@ func TestIntegration_Redirect_CoexistsWithProxy(t *testing.T) {
 
 	// Register a redirect service
 	err = registerService(client, "redir-coexist", "echo-connect", 8080,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-host":          "redir-coexist.localdev",
 			"caddy-redirect-code": "302",
@@ -89,7 +89,7 @@ func TestIntegration_Redirect_CoexistsWithProxy(t *testing.T) {
 
 	// Register a proxy service on a different host
 	err = registerService(client, "proxy-coexist", "echo-connect", 8080,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-host": "proxy-coexist.localdev",
 		},

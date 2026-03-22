@@ -187,6 +187,25 @@ The JSON field names match the Caddyfile directive names. The consul config live
 
 Services declare routing instructions via Consul service metadata or tags.
 
+### Service Discovery Tag
+
+Services using metadata-based routing (not Fabio `urlprefix-` tags) **must** include the `caddy-consul` tag in their service registration. This sentinel tag tells caddy-consul to inspect the service's metadata for routing configuration. Without it, the service will be skipped during catalog discovery.
+
+```json
+{
+    "service": {
+        "name": "my-app",
+        "port": 8080,
+        "tags": ["caddy-consul"],
+        "meta": {
+            "caddy-host": "app.example.com"
+        }
+    }
+}
+```
+
+Services using Fabio-compatible `urlprefix-` tags do NOT need the `caddy-consul` tag — they are detected automatically.
+
 ### Metadata Format (Preferred)
 
 | Key | Description | Default |
@@ -430,22 +449,38 @@ scrape_configs:
 
 ## Migration from Fabio
 
+### Service Discovery Requirements
+
+caddy-consul discovers services based on Consul service **tags**. A service must have at least one of the following tags to be discovered:
+
+| Tag | When to use |
+|-----|-------------|
+| `urlprefix-*` | Fabio-compatible services (auto-detected) |
+| `caddy-consul` | Services using `caddy-*` metadata for routing |
+
+Services with neither tag are skipped during catalog discovery. This keeps the health check load proportional to routable services, not total services in the cluster.
+
 ### Tag Mapping
 
-| Fabio Tag | caddy-consul Equivalent |
+| Fabio Tag | caddy-consul Equivalent (tag + metadata) |
 |-----------|------------------------|
-| `urlprefix-host.com/` | `caddy-host=host.com` |
-| `urlprefix-host.com/path` | `caddy-host=host.com`, `caddy-path=/path` |
-| `urlprefix-host.com/api strip=/api` | `caddy-host=host.com`, `caddy-path=/api`, `caddy-strip-prefix=true` |
-| `urlprefix-:5432 proto=tcp` | `caddy-protocol=tcp`, `caddy-port=5432` |
-| `urlprefix-old.com/ redirect=301,https://new.com$path` | `caddy-host=old.com`, `caddy-redirect-code=301`, `caddy-redirect-url=https://new.com{http.request.uri}` |
+| `urlprefix-host.com/` | tag: `caddy-consul`, meta: `caddy-host=host.com` |
+| `urlprefix-host.com/path` | tag: `caddy-consul`, meta: `caddy-host=host.com`, `caddy-path=/path` |
+| `urlprefix-host.com/api strip=/api` | tag: `caddy-consul`, meta: `caddy-host=host.com`, `caddy-path=/api`, `caddy-strip-prefix=true` |
+| `urlprefix-:5432 proto=tcp` | tag: `caddy-consul`, meta: `caddy-protocol=tcp`, `caddy-port=5432` |
+| `urlprefix-old.com/ redirect=301,https://new.com$path` | tag: `caddy-consul`, meta: `caddy-host=old.com`, `caddy-redirect-code=301`, `caddy-redirect-url=https://new.com{http.request.uri}` |
 
 ### Migration Steps
 
 1. Deploy Caddy with `caddy-consul` alongside Fabio
-2. Services already using `urlprefix-` tags will be discovered automatically
-3. Gradually migrate services to `caddy-*` metadata (optional, for richer features)
-4. Once all traffic flows through Caddy, decommission Fabio
+2. Services already using `urlprefix-` tags will be discovered automatically — no changes needed
+3. Gradually migrate services to `caddy-*` metadata:
+   - Add the `caddy-consul` tag to the service registration
+   - Add `caddy-*` metadata keys for routing configuration
+   - Keep `urlprefix-` tags during transition (caddy-consul prefers metadata when both exist)
+4. Verify traffic flows through Caddy correctly
+5. Remove `urlprefix-` tags from migrated services
+6. Once all traffic flows through Caddy, decommission Fabio
 
 ## Consul ACL Permissions
 
