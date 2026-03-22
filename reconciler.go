@@ -96,7 +96,13 @@ func (r *Reconciler) VerifyTCPServersExist() {
 		_ = resp.Body.Close()
 
 		// Check for 404, null body, or non-200 status
-		if resp.StatusCode != http.StatusOK || string(body) == "null" {
+		bodyStr := strings.TrimSpace(string(body))
+		r.logger.Debug("verify TCP server existence",
+			zap.String("server", name),
+			zap.Int("status", resp.StatusCode),
+			zap.String("body_preview", bodyStr[:min(len(bodyStr), 50)]),
+		)
+		if resp.StatusCode != http.StatusOK || bodyStr == "null" || bodyStr == "" {
 			r.logger.Info("persisted TCP server not found in live config, will re-create",
 				zap.String("server", name),
 			)
