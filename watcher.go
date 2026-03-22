@@ -223,7 +223,7 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 	for name := range currentNames {
 		catalogTags := catalogServices[name]
 
-		if len(catalogTags) > 0 && !hasCaddyRoutingTag(catalogTags, w.serviceTag, w.connectTag) {
+		if !hasCaddyRoutingTag(catalogTags, w.serviceTag, w.connectTag) {
 			skippedNoRouting++
 			continue
 		}

@@ -107,7 +107,7 @@ func TestIntegration_RegisterAndDeregisterService(t *testing.T) {
 	require.NoError(t, err)
 
 	err = registerService(client, "temp-svc", "echo-http", 8080,
-		nil,
+		[]string{"caddy-consul"},
 		map[string]string{
 			"caddy-host":     "temp.localdev",
 			"caddy-protocol": "http",
