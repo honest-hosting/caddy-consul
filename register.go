@@ -44,6 +44,30 @@ func (sr *ServiceRegistrar) Register() error {
 		sr.logger.Info("caddy service already registered in consul, skipping re-registration",
 			zap.String("service_name", sr.serviceName),
 		)
+
+		// Ensure the TTL check exists (it may have expired while Caddy was down)
+		checkID := "service:" + sr.serviceName + "-ttl"
+		if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
+			sr.logger.Info("TTL check expired, re-registering check",
+				zap.String("check_id", checkID),
+			)
+			check := &consul.AgentCheckRegistration{
+				ID:        sr.serviceName + "-ttl",
+				Name:      sr.serviceName + " TTL",
+				ServiceID: sr.serviceName,
+				AgentServiceCheck: consul.AgentServiceCheck{
+					TTL:    "30s",
+					Status: consul.HealthPassing,
+				},
+			}
+			if err := sr.client.Agent().CheckRegister(check); err != nil {
+				sr.logger.Warn("failed to re-register TTL check",
+					zap.String("check_id", checkID),
+					zap.Error(err),
+				)
+			}
+		}
+
 		go sr.ttlLoop()
 		return nil
 	}
