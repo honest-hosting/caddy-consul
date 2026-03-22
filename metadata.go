@@ -58,46 +58,121 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 	switch {
 	case hasIndexed:
 		routes = indexedRoutes
+		// Indexed routes use merged metadata — shared upstreams
+		var upstreams []Upstream
+		for _, inst := range svc.Instances {
+			if !inst.Healthy || inst.Address == "" {
+				continue
+			}
+			if !instanceHasRoutingConfig(inst, true) {
+				continue
+			}
+			upstreams = append(upstreams, Upstream{
+				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:  inst.Weight,
+				Healthy: true,
+			})
+		}
+		if len(upstreams) == 0 {
+			return nil
+		}
+		for i := range routes {
+			routes[i].ServiceName = svc.Name
+			routes[i].Upstreams = upstreams
+			routes[i].UpstreamMode = UpstreamDirect
+		}
+
 	case hasNonIndexed:
-		routes = []RouteDefinition{parseNonIndexedMeta(meta)}
+		// Non-indexed metadata: build effective metadata per instance by merging
+		// service-level meta with instance-level meta (instance overrides service).
+		// Group instances by their effective routing key (host+port+protocol) to
+		// handle both shared metadata (multiple upstreams) and per-instance
+		// metadata (e.g., multiple minecraft servers with different ports).
+		type routeKey struct {
+			host     string
+			path     string
+			port     int
+			protocol string
+		}
+		routeMap := make(map[routeKey]*RouteDefinition)
+		var routeOrder []routeKey
+
+		for _, inst := range svc.Instances {
+			if !inst.Healthy || inst.Address == "" {
+				continue
+			}
+
+			// Build effective metadata: service-level + instance-level (instance wins)
+			effectiveMeta := make(map[string]string)
+			for k, v := range svc.Meta {
+				effectiveMeta[k] = v
+			}
+			for k, v := range inst.Meta {
+				effectiveMeta[k] = v
+			}
+
+			if !hasNonIndexedMeta(effectiveMeta) {
+				continue
+			}
+
+			rd := parseNonIndexedMeta(effectiveMeta)
+			key := routeKey{
+				host:     rd.Host,
+				path:     rd.Path,
+				port:     rd.Port,
+				protocol: string(rd.Protocol),
+			}
+
+			upstream := Upstream{
+				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:  inst.Weight,
+				Healthy: true,
+			}
+
+			if existing, ok := routeMap[key]; ok {
+				// Same route key — add as additional upstream
+				existing.Upstreams = append(existing.Upstreams, upstream)
+			} else {
+				rd.ServiceName = svc.Name
+				rd.UpstreamMode = UpstreamDirect
+				rd.Upstreams = []Upstream{upstream}
+				routeMap[key] = &rd
+				routeOrder = append(routeOrder, key)
+			}
+		}
+
+		for _, key := range routeOrder {
+			routes = append(routes, *routeMap[key])
+		}
+
 	case hasFabio:
 		routes = fabioRoutes
+		// Fabio routes: only instances with urlprefix- tags are upstreams
+		var upstreams []Upstream
+		for _, inst := range svc.Instances {
+			if !inst.Healthy || inst.Address == "" {
+				continue
+			}
+			if !instanceHasRoutingConfig(inst, false) {
+				continue
+			}
+			upstreams = append(upstreams, Upstream{
+				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:  inst.Weight,
+				Healthy: true,
+			})
+		}
+		if len(upstreams) == 0 {
+			return nil
+		}
+		for i := range routes {
+			routes[i].ServiceName = svc.Name
+			routes[i].Upstreams = upstreams
+			routes[i].UpstreamMode = UpstreamDirect
+		}
+
 	default:
 		return nil
-	}
-
-	// Build upstreams from healthy instances that have routing config.
-	// A single Consul service name may have multiple instance types (frontend,
-	// cache, database) — only instances with urlprefix- tags or caddy-* metadata
-	// should be used as upstreams.
-	var upstreams []Upstream
-	for _, inst := range svc.Instances {
-		if !inst.Healthy {
-			continue
-		}
-		addr := inst.Address
-		if addr == "" {
-			continue
-		}
-		if !instanceHasRoutingConfig(inst, hasIndexed || hasNonIndexed) {
-			continue
-		}
-		upstreams = append(upstreams, Upstream{
-			Address: fmt.Sprintf("%s:%d", addr, inst.Port),
-			Weight:  inst.Weight,
-			Healthy: true,
-		})
-	}
-
-	if len(upstreams) == 0 {
-		return nil
-	}
-
-	// Apply common fields to all routes
-	for i := range routes {
-		routes[i].ServiceName = svc.Name
-		routes[i].Upstreams = upstreams
-		routes[i].UpstreamMode = UpstreamDirect
 	}
 
 	// Filter out disabled routes

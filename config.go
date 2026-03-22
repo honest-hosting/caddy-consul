@@ -27,6 +27,8 @@ const (
 	DefaultConnectAutoRegister = true
 	DefaultMaxConcurrentChecks = 5
 	DefaultCaddyAdminAPI       = "localhost:2019"
+	DefaultServiceTag          = "caddy-consul"
+	DefaultConnectTag          = "caddy-consul-connect"
 
 	// MaxServiceNameLen is the max length for a Consul service name (DNS label).
 	MaxServiceNameLen = 63
@@ -70,6 +72,8 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    max_concurrent_checks 5
 //	    debounce 500ms
 //	    caddy_admin_api localhost:2019
+//	    service_tag caddy-consul
+//	    connect_tag caddy-consul-connect
 //	    data_dir /var/lib/caddy-consul
 //	    metrics /metrics/consul
 //	}
@@ -215,6 +219,18 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.CaddyAdminAPI = d.Val()
 
+		case "service_tag":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.ServiceTag = d.Val()
+
+		case "connect_tag":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.ConnectTag = d.Val()
+
 		case "data_dir":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -285,6 +301,12 @@ func (cr *ConsulRouter) applyDefaults() {
 	}
 	if cr.CaddyAdminAPI == "" {
 		cr.CaddyAdminAPI = DefaultCaddyAdminAPI
+	}
+	if cr.ServiceTag == "" {
+		cr.ServiceTag = DefaultServiceTag
+	}
+	if cr.ConnectTag == "" {
+		cr.ConnectTag = DefaultConnectTag
 	}
 	if cr.DataDir == "" {
 		cr.DataDir = filepath.Join(caddy.AppDataDir(), "caddy-consul")

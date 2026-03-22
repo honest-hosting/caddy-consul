@@ -47,6 +47,8 @@ xcaddy build \
 | `connect_auto_register` | Auto-register Caddy in Consul on startup | `true` |
 | `max_concurrent_checks` | Max concurrent Consul health check queries | `5` |
 | `debounce` | Debounce window for rapid Consul changes | `500ms` |
+| `service_tag` | Sentinel tag for service proxy discovery | `caddy-consul` |
+| `connect_tag` | Sentinel tag for connect proxy discovery | `caddy-consul-connect` |
 | `caddy_admin_api` | Caddy admin API address for TCP route reconciliation | `localhost:2019` |
 | `data_dir` | Directory for runtime state (persisted across reloads) | `$XDG_DATA_HOME/caddy/caddy-consul` |
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
@@ -163,6 +165,8 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "connect_auto_register": true,
       "max_concurrent_checks": 5,
       "debounce_duration": "500ms",
+      "service_tag": "caddy-consul",
+      "connect_tag": "caddy-consul-connect",
       "caddy_admin_api": "localhost:2019",
       "data_dir": "/var/lib/caddy-consul",
       "metrics": "/metrics/consul"
@@ -187,10 +191,16 @@ The JSON field names match the Caddyfile directive names. The consul config live
 
 Services declare routing instructions via Consul service metadata or tags.
 
-### Service Discovery Tag
+### Service Discovery Tags
 
-Services using metadata-based routing (not Fabio `urlprefix-` tags) **must** include the `caddy-consul` tag in their service registration. This sentinel tag tells caddy-consul to inspect the service's metadata for routing configuration. Without it, the service will be skipped during catalog discovery.
+Services using metadata-based routing (not Fabio `urlprefix-` tags) **must** include a sentinel tag in their service registration. This tag tells caddy-consul to inspect the service's metadata for routing configuration. Without it, the service will be skipped during catalog discovery.
 
+| Tag | Purpose | Default |
+|-----|---------|---------|
+| `caddy-consul` | Standard service proxy routing | Configurable via `service_tag` |
+| `caddy-consul-connect` | Connect mesh service routing | Configurable via `connect_tag` |
+
+**Standard service** (direct routing):
 ```json
 {
     "service": {
@@ -204,7 +214,24 @@ Services using metadata-based routing (not Fabio `urlprefix-` tags) **must** inc
 }
 ```
 
-Services using Fabio-compatible `urlprefix-` tags do NOT need the `caddy-consul` tag — they are detected automatically.
+**Connect service** (sidecar routing):
+```json
+{
+    "service": {
+        "name": "my-mesh-app",
+        "port": 8080,
+        "tags": ["caddy-consul-connect"],
+        "meta": {
+            "caddy-host": "mesh-app.example.com"
+        },
+        "connect": {
+            "sidecar_service": {}
+        }
+    }
+}
+```
+
+Services using Fabio-compatible `urlprefix-` tags do NOT need sentinel tags — they are detected automatically.
 
 ### Metadata Format (Preferred)
 

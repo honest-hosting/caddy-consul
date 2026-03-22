@@ -46,6 +46,10 @@ type ConsulRouter struct {
 	// Caddy admin API
 	CaddyAdminAPI string `json:"caddy_admin_api,omitempty"`
 
+	// Service discovery tags
+	ServiceTag string `json:"service_tag,omitempty"`
+	ConnectTag string `json:"connect_tag,omitempty"`
+
 	// Data directory for runtime state (persisted across reloads)
 	DataDir string `json:"data_dir,omitempty"`
 
@@ -137,6 +141,8 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 			cr.parsedHealthPolicy(),
 			cr.parsedDebounceDuration(),
 			cr.MaxConcurrentChecks,
+			cr.ServiceTag,
+			cr.ConnectTag,
 			cr.onServicesChanged,
 		)
 	}

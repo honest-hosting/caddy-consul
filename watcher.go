@@ -20,6 +20,8 @@ type ConsulWatcher struct {
 	stopCh       chan struct{}
 	healthPolicy HealthPolicy
 	debounce     time.Duration
+	serviceTag   string // sentinel tag for service proxy discovery (default: "caddy-consul")
+	connectTag   string // sentinel tag for connect proxy discovery (default: "caddy-consul-connect")
 
 	// Per-service watch goroutine management
 	serviceStopChs map[string]chan struct{}
@@ -48,6 +50,8 @@ func NewConsulWatcher(
 	healthPolicy HealthPolicy,
 	debounce time.Duration,
 	maxConcurrentChecks int,
+	serviceTag string,
+	connectTag string,
 	onChange func([]ServiceChange, map[string]*ServiceState),
 ) *ConsulWatcher {
 	if maxConcurrentChecks < 1 {
@@ -61,6 +65,8 @@ func NewConsulWatcher(
 		stopCh:         make(chan struct{}),
 		healthPolicy:   healthPolicy,
 		debounce:       debounce,
+		serviceTag:     serviceTag,
+		connectTag:     connectTag,
 		serviceStopChs: make(map[string]chan struct{}),
 		healthSem:      make(chan struct{}, maxConcurrentChecks),
 	}
@@ -217,7 +223,7 @@ func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
 	for name := range currentNames {
 		catalogTags := catalogServices[name]
 
-		if len(catalogTags) > 0 && !hasCaddyRoutingTag(catalogTags) {
+		if len(catalogTags) > 0 && !hasCaddyRoutingTag(catalogTags, w.serviceTag, w.connectTag) {
 			skippedNoRouting++
 			continue
 		}
@@ -462,13 +468,14 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 // hasCaddyRoutingTag returns true if any tag signals routing config:
 //   - "urlprefix-*" (Fabio-compatible routing)
-//   - "caddy-consul" (sentinel tag indicating metadata-based routing config)
-func hasCaddyRoutingTag(tags []string) bool {
+//   - serviceTag (sentinel tag for service proxy, default: "caddy-consul")
+//   - connectTag (sentinel tag for connect proxy, default: "caddy-consul-connect")
+func hasCaddyRoutingTag(tags []string, serviceTag, connectTag string) bool {
 	for _, tag := range tags {
 		if strings.HasPrefix(tag, "urlprefix-") {
 			return true
 		}
-		if tag == "caddy-consul" {
+		if tag == serviceTag || tag == connectTag {
 			return true
 		}
 	}

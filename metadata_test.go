@@ -231,6 +231,67 @@ func TestParseServiceRoutes_MultipleUpstreams(t *testing.T) {
 	assert.Equal(t, 3, routes[0].Upstreams[0].Weight)
 }
 
+func TestParseServiceRoutes_PerInstanceMetadata(t *testing.T) {
+	// Multiple instances under the same service name, each with unique
+	// caddy-port metadata (e.g., minecraft servers). Each should produce
+	// its own TCP route.
+	svc := &ServiceState{
+		Name: "minecraft",
+		Tags: []string{"caddy-consul"},
+		Instances: []ServiceInstance{
+			{
+				ID:      "minecraft-server-a",
+				Address: "172.16.46.120",
+				Port:    25565,
+				Healthy: true,
+				Weight:  1,
+				Meta:    map[string]string{"caddy-protocol": "tcp", "caddy-port": "25565"},
+			},
+			{
+				ID:      "minecraft-server-b",
+				Address: "172.16.46.120",
+				Port:    25566,
+				Healthy: true,
+				Weight:  1,
+				Meta:    map[string]string{"caddy-protocol": "tcp", "caddy-port": "25566"},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 2, "each instance with unique caddy-port should produce its own route")
+
+	// Verify each route has a distinct port and one upstream
+	ports := map[int]bool{}
+	for _, r := range routes {
+		assert.Equal(t, ProtocolTCP, r.Protocol)
+		assert.Equal(t, "minecraft", r.ServiceName)
+		require.Len(t, r.Upstreams, 1)
+		ports[r.Port] = true
+	}
+	assert.True(t, ports[25565], "should have route for port 25565")
+	assert.True(t, ports[25566], "should have route for port 25566")
+}
+
+func TestParseServiceRoutes_SharedMetadata_MultipleUpstreams(t *testing.T) {
+	// Multiple instances with the SAME caddy metadata should produce
+	// one route with multiple upstreams (load balancing).
+	svc := &ServiceState{
+		Name: "web",
+		Meta: map[string]string{
+			"caddy-host": "app.example.com",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1},
+			{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 1},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 1, "same metadata should produce one route")
+	assert.Len(t, routes[0].Upstreams, 2, "both healthy instances should be upstreams")
+}
+
 func TestParseFabioTag_Basic(t *testing.T) {
 	tests := []struct {
 		tag      string
