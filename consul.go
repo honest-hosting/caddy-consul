@@ -198,6 +198,29 @@ func (cr *ConsulRouter) Start() error {
 			if catalogIdx > 0 && len(svcStates) > 0 {
 				cr.watcher.RestoreState(catalogIdx, healthIdx, svcStates, passingChecks)
 			}
+
+			// If there are persisted TCP servers, trigger an initial
+			// reconciliation to re-create L4 listeners from restored state.
+			// This uses only in-memory data — zero Consul queries.
+			_, tcpNames := cr.stateMgr.TCPState()
+			if len(tcpNames) > 0 && len(svcStates) > 0 {
+				cr.logger.Info("re-creating L4 servers from persisted state",
+					zap.Int("tcp_servers", len(tcpNames)),
+				)
+				// Build snapshot from restored service states
+				snapshot := make(map[string]*ServiceState, len(svcStates))
+				for name, pss := range svcStates {
+					snapshot[name] = &ServiceState{
+						Name:      pss.Name,
+						Tags:      pss.Tags,
+						Meta:      pss.Meta,
+						Instances: pss.Instances,
+						LastIndex: pss.LastIndex,
+					}
+				}
+				// Trigger route compilation and TCP reconciliation
+				go cr.onServicesChanged(nil, snapshot)
+			}
 		}
 		cr.watcher.Start()
 	}
