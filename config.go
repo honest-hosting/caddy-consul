@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +24,8 @@ const (
 	DefaultConnectProxyEnable  = false
 	DefaultDebounce            = "500ms"
 	DefaultConnectAutoRegister = true
-	DefaultMaxConcurrentChecks = 5
+	DefaultPollInterval        = "50ms"
+	DefaultFullSyncInterval    = "5m"
 	DefaultCaddyAdminAPI       = "localhost:2019"
 	DefaultServiceTag          = "caddy-consul"
 	DefaultConnectTag          = "caddy-consul-connect"
@@ -69,7 +69,8 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    connect_proxy_enable false
 //	    connect_service_name my-ingress
 //	    connect_auto_register true
-//	    max_concurrent_checks 5
+//	    poll_interval 50ms
+//	    full_sync_interval 5m
 //	    debounce 500ms
 //	    caddy_admin_api localhost:2019
 //	    service_tag caddy-consul
@@ -197,15 +198,17 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.Errf("connect_auto_register must be 'true' or 'false', got '%s'", d.Val())
 			}
 
-		case "max_concurrent_checks":
+		case "poll_interval":
 			if !d.NextArg() {
 				return d.ArgErr()
 			}
-			val, err := strconv.Atoi(d.Val())
-			if err != nil || val < 1 {
-				return d.Errf("max_concurrent_checks must be a positive integer, got '%s'", d.Val())
+			cr.PollInterval = d.Val()
+
+		case "full_sync_interval":
+			if !d.NextArg() {
+				return d.ArgErr()
 			}
-			cr.MaxConcurrentChecks = val
+			cr.FullSyncInterval = d.Val()
 
 		case "debounce":
 			if !d.NextArg() {
@@ -290,8 +293,11 @@ func (cr *ConsulRouter) applyDefaults() {
 	if cr.DebounceDuration == "" {
 		cr.DebounceDuration = DefaultDebounce
 	}
-	if cr.MaxConcurrentChecks == 0 {
-		cr.MaxConcurrentChecks = DefaultMaxConcurrentChecks
+	if cr.PollInterval == "" {
+		cr.PollInterval = DefaultPollInterval
+	}
+	if cr.FullSyncInterval == "" {
+		cr.FullSyncInterval = DefaultFullSyncInterval
 	}
 	if cr.ConnectServiceName == "" {
 		cr.ConnectServiceName = defaultConnectServiceName()
@@ -405,6 +411,18 @@ func (cr *ConsulRouter) parsedHealthPolicy() HealthPolicy {
 // parsedDebounceDuration returns the parsed debounce duration.
 func (cr *ConsulRouter) parsedDebounceDuration() time.Duration {
 	d, _ := time.ParseDuration(cr.DebounceDuration) // already validated
+	return d
+}
+
+// parsedPollInterval returns the parsed poll interval duration.
+func (cr *ConsulRouter) parsedPollInterval() time.Duration {
+	d, _ := time.ParseDuration(cr.PollInterval)
+	return d
+}
+
+// parsedFullSyncInterval returns the parsed full sync interval duration.
+func (cr *ConsulRouter) parsedFullSyncInterval() time.Duration {
+	d, _ := time.ParseDuration(cr.FullSyncInterval)
 	return d
 }
 

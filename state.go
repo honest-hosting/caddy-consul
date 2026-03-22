@@ -30,6 +30,10 @@ type persistedState struct {
 	CatalogIndex uint64                           `json:"catalog_index"`
 	Services     map[string]*persistedServiceState `json:"services,omitempty"`
 
+	// Health state watcher
+	HealthStateIndex uint64              `json:"health_state_index"`
+	PassingChecks    map[string][]string `json:"passing_checks,omitempty"` // ServiceName → []ServiceID
+
 	// Compiled route state
 	HTTPRoutes    []CompiledHTTPRoute `json:"http_routes,omitempty"`
 	HTTPRouteHash string              `json:"http_route_hash,omitempty"`
@@ -158,6 +162,34 @@ func (sm *stateManager) SetTCPState(hashes map[string]string, names []string) {
 	defer sm.mu.Unlock()
 	sm.state.TCPServerHashes = hashes
 	sm.state.TCPServerNames = names
+}
+
+// HealthStateIndex returns the persisted health state watch index.
+func (sm *stateManager) HealthStateIndex() uint64 {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.HealthStateIndex
+}
+
+// SetHealthStateIndex updates the persisted health state index.
+func (sm *stateManager) SetHealthStateIndex(idx uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.HealthStateIndex = idx
+}
+
+// PassingChecks returns the persisted passing checks map.
+func (sm *stateManager) PassingChecks() map[string][]string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.PassingChecks
+}
+
+// SetPassingChecks updates the persisted passing checks.
+func (sm *stateManager) SetPassingChecks(checks map[string][]string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.PassingChecks = checks
 }
 
 // CatalogIndex returns the persisted catalog watch index.

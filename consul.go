@@ -37,7 +37,8 @@ type ConsulRouter struct {
 	ConflictPolicy     string `json:"conflict_policy,omitempty"`
 	ConnectProxyEnable *bool  `json:"connect_proxy_enable,omitempty"`
 	DebounceDuration   string `json:"debounce_duration,omitempty"`
-	MaxConcurrentChecks int   `json:"max_concurrent_checks,omitempty"`
+	PollInterval       string `json:"poll_interval,omitempty"`
+	FullSyncInterval   string `json:"full_sync_interval,omitempty"`
 
 	// Connect
 	ConnectServiceName  string `json:"connect_service_name,omitempty"`
@@ -140,7 +141,8 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 			cr.logger,
 			cr.parsedHealthPolicy(),
 			cr.parsedDebounceDuration(),
-			cr.MaxConcurrentChecks,
+			cr.parsedPollInterval(),
+			cr.parsedFullSyncInterval(),
 			cr.ServiceTag,
 			cr.ConnectTag,
 			cr.onServicesChanged,
@@ -190,9 +192,11 @@ func (cr *ConsulRouter) Start() error {
 		// instead of re-fetching all services from scratch.
 		if cr.stateMgr != nil {
 			catalogIdx := cr.stateMgr.CatalogIndex()
+			healthIdx := cr.stateMgr.HealthStateIndex()
 			svcStates := cr.stateMgr.ServiceStates()
+			passingChecks := cr.stateMgr.PassingChecks()
 			if catalogIdx > 0 && len(svcStates) > 0 {
-				cr.watcher.RestoreState(catalogIdx, svcStates)
+				cr.watcher.RestoreState(catalogIdx, healthIdx, svcStates, passingChecks)
 			}
 		}
 		cr.watcher.Start()
@@ -332,7 +336,9 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 	cr.stateMgr.SetHTTPRoutes(compiled.HTTPRoutes)
 	cr.stateMgr.SetServiceStates(allServices)
 	if cr.watcher != nil {
-		cr.stateMgr.SetCatalogIndex(cr.watcher.catalogIndex)
+		cr.stateMgr.SetCatalogIndex(cr.watcher.CatalogIndex())
+		cr.stateMgr.SetHealthStateIndex(cr.watcher.HealthStateIndex())
+		cr.stateMgr.SetPassingChecks(cr.watcher.PassingChecks())
 	}
 
 	// Pre-compute TCP hashes for persistence before applying

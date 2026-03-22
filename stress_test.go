@@ -190,7 +190,7 @@ func TestConcurrent_WatcherDebounce(t *testing.T) {
 		mu.Unlock()
 	}
 
-	w := NewConsulWatcher(nil, testLogger(), HealthPolicyPassing, 50*time.Millisecond, 5, DefaultServiceTag, DefaultConnectTag, onChange)
+	w := NewConsulWatcher(nil, testLogger(), HealthPolicyPassing, 50*time.Millisecond, 50*time.Millisecond, 5*time.Minute, DefaultServiceTag, DefaultConnectTag, onChange)
 
 	// Rapidly queue changes from multiple goroutines
 	var wg sync.WaitGroup

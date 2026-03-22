@@ -1,7 +1,6 @@
 package caddyconsul
 
 import (
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -10,7 +9,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// ConsulWatcher watches Consul for service changes using blocking queries.
+// ConsulWatcher watches Consul for service changes using two blocking queries:
+//   - /v1/catalog/services — detects service add/remove
+//   - /v1/health/state/passing — detects health changes across ALL services
+//
+// This architecture uses 2 connections regardless of service count, scaling
+// to 10,000+ services without overwhelming the Consul agent.
 type ConsulWatcher struct {
 	client       *consul.Client
 	logger       *zap.Logger
@@ -20,15 +24,10 @@ type ConsulWatcher struct {
 	stopCh       chan struct{}
 	healthPolicy HealthPolicy
 	debounce     time.Duration
-	serviceTag   string // sentinel tag for service proxy discovery (default: "caddy-consul")
-	connectTag   string // sentinel tag for connect proxy discovery (default: "caddy-consul-connect")
-
-	// Per-service watch goroutine management
-	serviceStopChs map[string]chan struct{}
-	serviceStopMu  sync.Mutex
-
-	// Semaphore to limit concurrent health API calls
-	healthSem chan struct{}
+	pollInterval time.Duration
+	fullSyncInterval time.Duration
+	serviceTag   string
+	connectTag   string
 
 	// Debounce state
 	debounceMu    sync.Mutex
@@ -36,8 +35,15 @@ type ConsulWatcher struct {
 	pendingChanges []ServiceChange
 	inDebounce    bool
 
-	// Catalog watch index
-	catalogIndex uint64
+	// Blocking query indexes
+	catalogIndex     uint64
+	healthStateIndex uint64
+
+	// Health state tracking for diffing
+	lastPassingChecks map[string]map[string]bool // ServiceName → set of passing ServiceIDs
+
+	// Names of routable services (filtered by tags)
+	routableServices map[string]bool
 
 	// stopOnce ensures Stop() is safe to call multiple times.
 	stopOnce sync.Once
@@ -49,37 +55,36 @@ func NewConsulWatcher(
 	logger *zap.Logger,
 	healthPolicy HealthPolicy,
 	debounce time.Duration,
-	maxConcurrentChecks int,
+	pollInterval time.Duration,
+	fullSyncInterval time.Duration,
 	serviceTag string,
 	connectTag string,
 	onChange func([]ServiceChange, map[string]*ServiceState),
 ) *ConsulWatcher {
-	if maxConcurrentChecks < 1 {
-		maxConcurrentChecks = 5
-	}
 	return &ConsulWatcher{
-		client:         client,
-		logger:         logger,
-		services:       make(map[string]*ServiceState),
-		onChange:        onChange,
-		stopCh:         make(chan struct{}),
-		healthPolicy:   healthPolicy,
-		debounce:       debounce,
-		serviceTag:     serviceTag,
-		connectTag:     connectTag,
-		serviceStopChs: make(map[string]chan struct{}),
-		healthSem:      make(chan struct{}, maxConcurrentChecks),
+		client:            client,
+		logger:            logger,
+		services:          make(map[string]*ServiceState),
+		onChange:           onChange,
+		stopCh:            make(chan struct{}),
+		healthPolicy:      healthPolicy,
+		debounce:          debounce,
+		pollInterval:      pollInterval,
+		fullSyncInterval:  fullSyncInterval,
+		serviceTag:        serviceTag,
+		connectTag:        connectTag,
+		lastPassingChecks: make(map[string]map[string]bool),
+		routableServices:  make(map[string]bool),
 	}
 }
 
-// RestoreState restores watcher state from a previous run. This allows the
-// watcher to resume blocking queries from where it left off instead of
-// re-fetching all services from scratch, avoiding Consul 429 rate limits.
-func (w *ConsulWatcher) RestoreState(catalogIndex uint64, services map[string]*persistedServiceState) {
+// RestoreState restores watcher state from a previous run.
+func (w *ConsulWatcher) RestoreState(catalogIndex uint64, healthStateIndex uint64, services map[string]*persistedServiceState, passingChecks map[string][]string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	w.catalogIndex = catalogIndex
+	w.healthStateIndex = healthStateIndex
 
 	for name, pss := range services {
 		w.services[name] = &ServiceState{
@@ -89,36 +94,39 @@ func (w *ConsulWatcher) RestoreState(catalogIndex uint64, services map[string]*p
 			Instances: pss.Instances,
 			LastIndex: pss.LastIndex,
 		}
+		w.routableServices[name] = true
+	}
+
+	// Restore passing checks for diffing
+	for svcName, ids := range passingChecks {
+		idSet := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			idSet[id] = true
+		}
+		w.lastPassingChecks[svcName] = idSet
 	}
 
 	if len(services) > 0 {
 		w.logger.Info("restored watcher state from disk",
 			zap.Uint64("catalog_index", catalogIndex),
+			zap.Uint64("health_state_index", healthStateIndex),
 			zap.Int("services", len(services)),
 		)
 	}
 }
 
 // Start begins watching Consul for service changes. Non-blocking.
-// If state was restored via RestoreState, the watcher does NOT re-start
-// health watchers for all restored services — the routes are already served
-// from persisted state. Only the catalog watcher starts, and it will detect
-// changes incrementally using the restored catalog index.
+// Launches 3 goroutines: catalog watcher, health state watcher, and periodic full sync.
 func (w *ConsulWatcher) Start() {
 	go w.watchCatalog()
+	go w.watchHealthState()
+	go w.periodicFullSync()
 }
 
 // Stop gracefully stops all watchers. Safe to call multiple times.
 func (w *ConsulWatcher) Stop() {
 	w.stopOnce.Do(func() {
 		close(w.stopCh)
-
-		w.serviceStopMu.Lock()
-		for _, ch := range w.serviceStopChs {
-			close(ch)
-		}
-		w.serviceStopChs = make(map[string]chan struct{})
-		w.serviceStopMu.Unlock()
 
 		w.debounceMu.Lock()
 		if w.debounceTimer != nil {
@@ -131,11 +139,6 @@ func (w *ConsulWatcher) Stop() {
 // watchCatalog watches the Consul service catalog for new/removed services.
 func (w *ConsulWatcher) watchCatalog() {
 	backoff := time.Second
-
-	// On first iteration after restore, use WaitIndex=0 to force a fresh
-	// catalog fetch. This ensures reconcileServices runs immediately and
-	// starts health watchers for restored services, rather than waiting
-	// up to 5 minutes for a catalog change that may never come.
 	firstQuery := true
 
 	for {
@@ -147,8 +150,6 @@ func (w *ConsulWatcher) watchCatalog() {
 
 		waitIndex := w.catalogIndex
 		if firstQuery {
-			// Force a non-blocking fetch on first query to ensure
-			// reconcileServices runs immediately and starts health watchers.
 			waitIndex = 0
 			firstQuery = false
 		}
@@ -191,180 +192,117 @@ func shouldSkipService(name string) bool {
 	return false
 }
 
-// reconcileServices compares the catalog response with known services and starts/stops
-// per-service health watchers as needed.
+// reconcileServices compares the catalog response with known services.
+// New routable services get a single health fetch. Removed services are cleaned up.
 func (w *ConsulWatcher) reconcileServices(catalogServices map[string][]string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
+	var filtered, skippedNoRouting int
+	currentRoutable := make(map[string]bool)
 
-	var filtered int
-	currentNames := make(map[string]bool)
-	for name := range catalogServices {
+	for name, tags := range catalogServices {
 		if shouldSkipService(name) {
 			filtered++
 			continue
 		}
-		currentNames[name] = true
-	}
-
-	if filtered > 0 {
-		w.logger.Debug("filtered services from catalog",
-			zap.Int("filtered", filtered),
-			zap.Int("remaining", len(currentNames)),
-		)
-	}
-
-	// Start watchers for new or restored services.
-	// Only watch services that signal routing config via tags:
-	//   - "urlprefix-*" (Fabio compatibility)
-	//   - "caddy-consul" (sentinel tag for metadata-based routing)
-	// Services with no tags at all are also watched (they might be legacy).
-	var skippedNoRouting int
-	for name := range currentNames {
-		catalogTags := catalogServices[name]
-
-		if !hasCaddyRoutingTag(catalogTags, w.serviceTag, w.connectTag) {
+		if !hasCaddyRoutingTag(tags, w.serviceTag, w.connectTag) {
 			skippedNoRouting++
 			continue
 		}
-
-		if _, exists := w.services[name]; !exists {
-			w.logger.Debug("new service discovered", zap.String("service", name))
-			w.services[name] = &ServiceState{
-				Name: name,
-				Tags: catalogTags,
-			}
-			w.startServiceWatch(name)
-		} else {
-			// Service exists (possibly from restored state) — ensure it has
-			// a running health watcher.
-			w.serviceStopMu.Lock()
-			_, hasWatcher := w.serviceStopChs[name]
-			w.serviceStopMu.Unlock()
-
-			if !hasWatcher {
-				w.startServiceWatch(name)
-			}
-		}
+		currentRoutable[name] = true
 	}
-	if skippedNoRouting > 0 {
-		w.logger.Debug("skipped services with no routing tags in catalog",
-			zap.Int("skipped", skippedNoRouting),
+
+	if filtered > 0 || skippedNoRouting > 0 {
+		w.logger.Debug("filtered services from catalog",
+			zap.Int("sidecar_proxy_filtered", filtered),
+			zap.Int("no_routing_tag", skippedNoRouting),
+			zap.Int("routable", len(currentRoutable)),
 		)
 	}
 
-	// Stop watchers for removed services
+	// Detect new and removed services under the lock
+	w.mu.Lock()
+
+	var newServices []string
+	for name := range currentRoutable {
+		if _, exists := w.services[name]; !exists {
+			newServices = append(newServices, name)
+		}
+	}
+
 	var removedChanges []ServiceChange
 	for name, svc := range w.services {
-		if !currentNames[name] {
+		if !currentRoutable[name] {
 			w.logger.Info("service removed", zap.String("service", name))
-			w.stopServiceWatch(name)
 			removedChanges = append(removedChanges, ServiceChange{
 				Type:    ChangeRemoved,
 				Service: svc,
 			})
 			delete(w.services, name)
+			delete(w.routableServices, name)
 		}
 	}
 
+	w.routableServices = currentRoutable
+	w.mu.Unlock()
+
+	// Queue removals
 	if len(removedChanges) > 0 {
 		w.queueChanges(removedChanges)
 	}
-}
 
-// startServiceWatch starts a goroutine to watch health for a specific service.
-func (w *ConsulWatcher) startServiceWatch(name string) {
-	w.serviceStopMu.Lock()
-	stopCh := make(chan struct{})
-	w.serviceStopChs[name] = stopCh
-	w.serviceStopMu.Unlock()
+	// Fetch health for new services (sequential, rate-limited, outside lock)
+	for _, name := range newServices {
+		select {
+		case <-w.stopCh:
+			return
+		default:
+		}
 
-	go w.watchServiceHealth(name, stopCh)
-}
+		w.logger.Debug("new service discovered, fetching health",
+			zap.String("service", name),
+		)
+		w.fetchServiceHealth(name)
 
-// stopServiceWatch stops the health watcher for a specific service.
-func (w *ConsulWatcher) stopServiceWatch(name string) {
-	w.serviceStopMu.Lock()
-	if ch, ok := w.serviceStopChs[name]; ok {
-		close(ch)
-		delete(w.serviceStopChs, name)
+		if w.pollInterval > 0 {
+			select {
+			case <-time.After(w.pollInterval):
+			case <-w.stopCh:
+				return
+			}
+		}
 	}
-	w.serviceStopMu.Unlock()
 }
 
-// watchServiceHealth watches health endpoint for a specific service using blocking queries.
-func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
-	// Resume from persisted index if available (skips initial fetch burst)
-	w.mu.RLock()
-	var lastIndex uint64
-	if svc, ok := w.services[name]; ok {
-		lastIndex = svc.LastIndex
-	}
-	w.mu.RUnlock()
-
+// watchHealthState watches /v1/health/state/passing for ANY health change
+// across ALL services. When a change is detected, diffs the passing checks
+// and updates Healthy flags on cached instances — no extra queries needed.
+func (w *ConsulWatcher) watchHealthState() {
 	backoff := time.Second
 	firstQuery := true
 
-	// Stagger initial queries with random jitter to avoid thundering herd
-	jitter := time.Duration(rand.Int63n(int64(100 * time.Millisecond)))
-	select {
-	case <-time.After(jitter):
-	case <-w.stopCh:
-		return
-	case <-stopCh:
-		return
-	}
+	w.logger.Info("health state watcher started",
+		zap.Uint64("initial_index", w.healthStateIndex),
+	)
 
 	for {
 		select {
 		case <-w.stopCh:
 			return
-		case <-stopCh:
-			return
 		default:
 		}
 
-		// Acquire semaphore for the first query from this goroutine (whether
-		// fresh or restored) and for non-blocking retries. This prevents a
-		// thundering herd when many services are restored or discovered at once.
-		// Subsequent blocking queries (long-polls) bypass the semaphore since
-		// Consul handles them efficiently.
-		needsSemaphore := firstQuery || lastIndex == 0
-		if needsSemaphore {
-			select {
-			case w.healthSem <- struct{}{}:
-			case <-w.stopCh:
-				return
-			case <-stopCh:
-				return
-			}
-		}
-
-		passingOnly := w.healthPolicy == HealthPolicyPassing
-
 		opts := &consul.QueryOptions{
-			WaitIndex: lastIndex,
+			WaitIndex: w.healthStateIndex,
 			WaitTime:  5 * time.Minute,
 		}
 
-		entries, meta, err := w.client.Health().Service(name, "", passingOnly, opts)
-
-		// Release semaphore
-		if needsSemaphore {
-			<-w.healthSem
-			firstQuery = false
-		}
-
+		checks, meta, err := w.client.Health().State("passing", opts)
 		if err != nil {
-			w.logger.Error("failed to query service health",
-				zap.String("service", name),
+			w.logger.Error("failed to query health state",
 				zap.Error(err),
 				zap.Duration("retry_in", backoff),
 			)
 			select {
 			case <-w.stopCh:
-				return
-			case <-stopCh:
 				return
 			case <-time.After(backoff):
 			}
@@ -374,102 +312,272 @@ func (w *ConsulWatcher) watchServiceHealth(name string, stopCh chan struct{}) {
 
 		backoff = time.Second
 
-		if meta.LastIndex == lastIndex {
+		if meta.LastIndex == w.healthStateIndex {
 			continue
 		}
-		lastIndex = meta.LastIndex
+		w.healthStateIndex = meta.LastIndex
 
-		// If there are no entries (no healthy instances yet), wait briefly and retry
-		// instead of falling into a 5-minute blocking query.
-		if len(entries) == 0 {
-			select {
-			case <-time.After(1 * time.Second):
-			case <-w.stopCh:
-				return
-			case <-stopCh:
-				return
-			}
-			lastIndex = 0 // reset to trigger immediate non-blocking query
-			continue
+		if firstQuery {
+			firstQuery = false
+			w.logger.Info("health state watcher initial response",
+				zap.Int("passing_checks", len(checks)),
+				zap.Uint64("index", meta.LastIndex),
+			)
 		}
 
-		// Convert to our types
-		var instances []ServiceInstance
-		serviceMeta := make(map[string]string)
-		tagSet := make(map[string]bool)
+		// Build current passing checks map: ServiceName → set of ServiceIDs
+		currentPassing := make(map[string]map[string]bool)
+		for _, check := range checks {
+			if check.ServiceName == "" {
+				continue // node-level check, not service-specific
+			}
+			if _, ok := currentPassing[check.ServiceName]; !ok {
+				currentPassing[check.ServiceName] = make(map[string]bool)
+			}
+			currentPassing[check.ServiceName][check.ServiceID] = true
+		}
 
-		for _, entry := range entries {
-			healthy := w.isHealthy(entry)
+		// Diff against last known state — find services with changed health
+		w.mu.Lock()
+		var changedServices []string
 
-			inst := ServiceInstance{
-				ID:      entry.Service.ID,
-				Address: serviceAddress(entry),
-				Port:    entry.Service.Port,
-				Tags:    entry.Service.Tags,
-				Meta:    entry.Service.Meta,
-				Healthy: healthy,
-				Weight:  1,
+		// Check for services that lost or gained healthy instances
+		allServiceNames := make(map[string]bool)
+		for name := range w.lastPassingChecks {
+			allServiceNames[name] = true
+		}
+		for name := range currentPassing {
+			allServiceNames[name] = true
+		}
+
+		for name := range allServiceNames {
+			if !w.routableServices[name] {
+				continue // not a service we care about
 			}
 
-			if entry.Service.Weights.Passing > 0 {
-				inst.Weight = entry.Service.Weights.Passing
+			oldIDs := w.lastPassingChecks[name]
+			newIDs := currentPassing[name]
+
+			if !sameIDSet(oldIDs, newIDs) {
+				changedServices = append(changedServices, name)
+			}
+		}
+
+		// Update passing checks snapshot
+		w.lastPassingChecks = currentPassing
+
+		// Update Healthy flags on cached instances, or re-fetch if new IDs appear
+		var changes []ServiceChange
+		var needsRefetch []string
+
+		for _, name := range changedServices {
+			svc, exists := w.services[name]
+			if !exists {
+				continue
 			}
 
-			instances = append(instances, inst)
+			passingIDs := currentPassing[name]
 
-			// Collect tags from ALL instances (union)
-			for _, tag := range entry.Service.Tags {
-				tagSet[tag] = true
+			// Check if there are new ServiceIDs not in our cached instances
+			// (e.g., health check just passed for the first time, or new instance added)
+			cachedIDs := make(map[string]bool)
+			for _, inst := range svc.Instances {
+				cachedIDs[inst.ID] = true
 			}
-			// Collect meta from all instances (first-seen wins for duplicates)
-			for k, v := range entry.Service.Meta {
-				if _, exists := serviceMeta[k]; !exists {
-					serviceMeta[k] = v
+
+			hasNewIDs := false
+			for id := range passingIDs {
+				if !cachedIDs[id] {
+					hasNewIDs = true
+					break
 				}
 			}
+
+			if hasNewIDs || len(svc.Instances) == 0 {
+				// New instance IDs or empty cache — need full re-fetch
+				needsRefetch = append(needsRefetch, name)
+				continue
+			}
+
+			// Just update Healthy flags on existing instances
+			anyChanged := false
+			for i := range svc.Instances {
+				wasHealthy := svc.Instances[i].Healthy
+				nowHealthy := passingIDs[svc.Instances[i].ID]
+
+				if wasHealthy != nowHealthy {
+					svc.Instances[i].Healthy = nowHealthy
+					anyChanged = true
+				}
+			}
+
+			if anyChanged {
+				changes = append(changes, ServiceChange{
+					Type:    ChangeUpdated,
+					Service: svc,
+				})
+			}
 		}
 
-		// Convert tag set to slice
-		var tags []string
-		for tag := range tagSet {
-			tags = append(tags, tag)
-		}
-
-		w.mu.Lock()
-		svc, exists := w.services[name]
-		if !exists {
-			w.mu.Unlock()
-			return
-		}
-
-		changeType := ChangeUpdated
-		if svc.LastIndex == 0 {
-			changeType = ChangeAdded
-		}
-
-		svc.Instances = instances
-		svc.Tags = tags
-		svc.Meta = serviceMeta
-		svc.LastIndex = lastIndex
 		w.mu.Unlock()
 
-		w.queueChanges([]ServiceChange{
-			{Type: changeType, Service: svc},
-		})
+		// Re-fetch services with new/unknown instance IDs
+		for _, name := range needsRefetch {
+			w.fetchServiceHealth(name)
+		}
 
-		// Note: routing config detection is handled at the catalog level
-		// (in reconcileServices). Services that pass the catalog filter
-		// keep their health watcher running — instances may register
-		// gradually and not all have routing tags initially.
+		if len(changes) > 0 {
+			w.logger.Info("health state changed",
+				zap.Int("affected_services", len(changes)),
+				zap.Int("refetched", len(needsRefetch)),
+			)
+			w.queueChanges(changes)
+		}
 	}
 }
 
+// sameIDSet returns true if two sets contain the same elements.
+func sameIDSet(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for id := range a {
+		if !b[id] {
+			return false
+		}
+	}
+	return true
+}
 
+// fetchServiceHealth fetches full health details for a single service and
+// updates the service state. Used for new services and full sync.
+func (w *ConsulWatcher) fetchServiceHealth(name string) {
+	passingOnly := w.healthPolicy == HealthPolicyPassing
 
-// hasCaddyRoutingTag returns true if any tag signals routing config:
-//   - "urlprefix-*" (Fabio-compatible routing)
-//   - serviceTag (sentinel tag for service proxy, default: "caddy-consul")
-//   - connectTag (sentinel tag for connect proxy, default: "caddy-consul-connect")
+	entries, meta, err := w.client.Health().Service(name, "", passingOnly, nil)
+	if err != nil {
+		w.logger.Error("failed to fetch service health",
+			zap.String("service", name),
+			zap.Error(err),
+		)
+		return
+	}
+
+	var instances []ServiceInstance
+	serviceMeta := make(map[string]string)
+	tagSet := make(map[string]bool)
+
+	for _, entry := range entries {
+		healthy := w.isHealthy(entry)
+
+		inst := ServiceInstance{
+			ID:      entry.Service.ID,
+			Address: serviceAddress(entry),
+			Port:    entry.Service.Port,
+			Tags:    entry.Service.Tags,
+			Meta:    entry.Service.Meta,
+			Healthy: healthy,
+			Weight:  1,
+		}
+
+		if entry.Service.Weights.Passing > 0 {
+			inst.Weight = entry.Service.Weights.Passing
+		}
+
+		instances = append(instances, inst)
+
+		for _, tag := range entry.Service.Tags {
+			tagSet[tag] = true
+		}
+		for k, v := range entry.Service.Meta {
+			if _, exists := serviceMeta[k]; !exists {
+				serviceMeta[k] = v
+			}
+		}
+	}
+
+	var tags []string
+	for tag := range tagSet {
+		tags = append(tags, tag)
+	}
+
+	w.mu.Lock()
+	svc, exists := w.services[name]
+	changeType := ChangeUpdated
+	if !exists {
+		svc = &ServiceState{Name: name}
+		w.services[name] = svc
+		changeType = ChangeAdded
+	}
+
+	svc.Instances = instances
+	svc.Tags = tags
+	svc.Meta = serviceMeta
+	svc.LastIndex = meta.LastIndex
+	w.mu.Unlock()
+
+	w.queueChanges([]ServiceChange{
+		{Type: changeType, Service: svc},
+	})
+}
+
+// periodicFullSync periodically re-fetches all routable services to catch
+// metadata/tag changes that aren't detected by the health state watcher.
+func (w *ConsulWatcher) periodicFullSync() {
+	if w.fullSyncInterval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(w.fullSyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopCh:
+			return
+		case <-ticker.C:
+			w.fullSync()
+		}
+	}
+}
+
+// fullSync re-fetches health for all routable services sequentially.
+func (w *ConsulWatcher) fullSync() {
+	w.mu.RLock()
+	var names []string
+	for name := range w.routableServices {
+		names = append(names, name)
+	}
+	w.mu.RUnlock()
+
+	w.logger.Info("starting full sync",
+		zap.Int("services", len(names)),
+	)
+
+	for _, name := range names {
+		select {
+		case <-w.stopCh:
+			return
+		default:
+		}
+
+		w.fetchServiceHealth(name)
+
+		if w.pollInterval > 0 {
+			select {
+			case <-time.After(w.pollInterval):
+			case <-w.stopCh:
+				return
+			}
+		}
+	}
+
+	w.logger.Info("full sync completed",
+		zap.Int("services", len(names)),
+	)
+}
+
+// hasCaddyRoutingTag returns true if any tag signals routing config.
 func hasCaddyRoutingTag(tags []string, serviceTag, connectTag string) bool {
 	for _, tag := range tags {
 		if strings.HasPrefix(tag, "urlprefix-") {
@@ -526,7 +634,6 @@ func (w *ConsulWatcher) queueChanges(changes []ServiceChange) {
 
 	w.pendingChanges = append(w.pendingChanges, changes...)
 
-	// Reset or start the debounce timer
 	if w.debounceTimer != nil {
 		w.debounceTimer.Stop()
 	}
@@ -546,7 +653,6 @@ func (w *ConsulWatcher) flushChanges() {
 		return
 	}
 
-	// Count unique services
 	serviceSet := make(map[string]bool)
 	for _, c := range changes {
 		serviceSet[c.Service.Name] = true
@@ -557,18 +663,40 @@ func (w *ConsulWatcher) flushChanges() {
 		zap.Int("services", len(serviceSet)),
 	)
 
-	// Deep-copy snapshot so the onChange callback gets immutable data.
-	// Only include services that have received at least one health response
-	// (LastIndex > 0). Services just discovered from the catalog but not yet
-	// health-checked would have 0 instances and produce empty routes.
 	w.mu.RLock()
 	snapshot := make(map[string]*ServiceState, len(w.services))
 	for k, v := range w.services {
-		if v.LastIndex > 0 {
+		if v.LastIndex > 0 || len(v.Instances) > 0 {
 			snapshot[k] = v.clone()
 		}
 	}
 	w.mu.RUnlock()
 
 	w.onChange(changes, snapshot)
+}
+
+// HealthStateIndex returns the current health state blocking query index.
+func (w *ConsulWatcher) HealthStateIndex() uint64 {
+	return w.healthStateIndex
+}
+
+// PassingChecks returns the current passing checks map for state persistence.
+func (w *ConsulWatcher) PassingChecks() map[string][]string {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+
+	result := make(map[string][]string, len(w.lastPassingChecks))
+	for svcName, ids := range w.lastPassingChecks {
+		idList := make([]string, 0, len(ids))
+		for id := range ids {
+			idList = append(idList, id)
+		}
+		result[svcName] = idList
+	}
+	return result
+}
+
+// CatalogIndex returns the current catalog blocking query index (exported for state persistence).
+func (w *ConsulWatcher) CatalogIndex() uint64 {
+	return w.catalogIndex
 }

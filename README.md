@@ -45,7 +45,8 @@ xcaddy build \
 | `connect_proxy_enable` | Enable Connect sidecar proxy routing | `false` |
 | `connect_service_name` | Caddy's service identity in the mesh | `<hostname>-caddy-consul` |
 | `connect_auto_register` | Auto-register Caddy in Consul on startup | `true` |
-| `max_concurrent_checks` | Max concurrent Consul health check queries | `5` |
+| `poll_interval` | Delay between sequential health queries during initial load/sync | `50ms` |
+| `full_sync_interval` | How often to re-fetch all services (catches metadata changes) | `5m` |
 | `debounce` | Debounce window for rapid Consul changes | `500ms` |
 | `service_tag` | Sentinel tag for service proxy discovery | `caddy-consul` |
 | `connect_tag` | Sentinel tag for connect proxy discovery | `caddy-consul-connect` |
@@ -163,7 +164,8 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "connect_proxy_enable": false,
       "connect_service_name": "my-ingress",
       "connect_auto_register": true,
-      "max_concurrent_checks": 5,
+      "poll_interval": "50ms",
+      "full_sync_interval": "5m",
       "debounce_duration": "500ms",
       "service_tag": "caddy-consul",
       "connect_tag": "caddy-consul-connect",
@@ -357,12 +359,26 @@ If both metadata and Fabio tags exist, metadata takes precedence.
 
 HTTP routing uses an in-memory route table — **no Caddy config reloads** for HTTP route changes:
 
-1. The `consul` app watches Consul for service changes
+1. The `consul` app watches Consul for service changes using **2 blocking queries** (catalog + health state)
 2. On change, routes are compiled and the in-memory route table is updated
 3. The `consul_proxy` HTTP handler matches each request against the route table at request time
 4. Static routes defined in your Caddyfile run first (before `consul_proxy`) and always win
 
 TCP routing uses the Caddy admin API to create L4 servers (since new TCP listener ports require config changes). TCP state is persisted across reloads to prevent cascading reload cycles.
+
+### Scaling
+
+The watcher uses only 2 Consul connections regardless of service count:
+- **Catalog watcher**: blocking query on `/v1/catalog/services` — detects service add/remove
+- **Health state watcher**: blocking query on `/v1/health/state/passing` — detects health changes across ALL services
+
+Health changes (node failure, instance recovery) update cached state locally — **zero extra Consul queries**. New services get a single targeted health fetch. A periodic full sync (`full_sync_interval`) catches metadata changes.
+
+| Scale | Connections | Cold start time | Health change detection |
+|-------|-------------|----------------|----------------------|
+| 50 services | 2 | ~2.5s | Instant |
+| 1,000 services | 2 | ~50s | Instant |
+| 10,000 services | 2 | ~8min (routes from disk instantly) | Instant |
 
 ### Admin API endpoints
 
