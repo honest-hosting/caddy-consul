@@ -45,14 +45,21 @@ func (sr *ServiceRegistrar) Register() error {
 			zap.String("service_name", sr.serviceName),
 		)
 
-		// Ensure the TTL check exists (it may have expired while Caddy was down)
-		checkID := "service:" + sr.serviceName + "-ttl"
-		if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
-			sr.logger.Info("TTL check expired, re-registering check",
-				zap.String("check_id", checkID),
+		// Ensure the TTL check exists (it may have expired while Caddy was down).
+		// Try both prefixed and raw check IDs since Consul uses different formats
+		// depending on how the check was originally created.
+		prefixedID := "service:" + sr.serviceName + "-ttl"
+		rawID := sr.serviceName + "-ttl"
+		err := sr.client.Agent().UpdateTTL(prefixedID, "caddy-consul healthy", consul.HealthPassing)
+		if err != nil {
+			err = sr.client.Agent().UpdateTTL(rawID, "caddy-consul healthy", consul.HealthPassing)
+		}
+		if err != nil {
+			sr.logger.Info("TTL check not found, re-registering",
+				zap.String("service", sr.serviceName),
 			)
 			check := &consul.AgentCheckRegistration{
-				ID:        sr.serviceName + "-ttl",
+				ID:        rawID,
 				Name:      sr.serviceName + " TTL",
 				ServiceID: sr.serviceName,
 				AgentServiceCheck: consul.AgentServiceCheck{
@@ -62,7 +69,7 @@ func (sr *ServiceRegistrar) Register() error {
 			}
 			if err := sr.client.Agent().CheckRegister(check); err != nil {
 				sr.logger.Warn("failed to re-register TTL check",
-					zap.String("check_id", checkID),
+					zap.String("check_id", rawID),
 					zap.Error(err),
 				)
 			}
@@ -109,8 +116,11 @@ func (sr *ServiceRegistrar) Stop() {
 }
 
 // ttlLoop periodically updates the TTL health check to keep the service passing.
+// Tries both the service-prefixed ID (from embedded service registration) and the
+// raw ID (from standalone check registration) to handle both creation paths.
 func (sr *ServiceRegistrar) ttlLoop() {
 	checkID := "service:" + sr.serviceName + "-ttl"
+	rawCheckID := sr.serviceName + "-ttl"
 	ticker := time.NewTicker(15 * time.Second) // update every 15s for a 30s TTL
 	defer ticker.Stop()
 
@@ -119,7 +129,12 @@ func (sr *ServiceRegistrar) ttlLoop() {
 		case <-sr.stopCh:
 			return
 		case <-ticker.C:
-			if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
+			err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing)
+			if err != nil {
+				// Try raw ID (from standalone CheckRegister)
+				err = sr.client.Agent().UpdateTTL(rawCheckID, "caddy-consul healthy", consul.HealthPassing)
+			}
+			if err != nil {
 				sr.logger.Warn("failed to update TTL health check",
 					zap.String("check_id", checkID),
 					zap.Error(err),
