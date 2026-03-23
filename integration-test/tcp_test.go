@@ -134,13 +134,15 @@ func TestIntegration_TCP_Connect_Sidecar(t *testing.T) {
 	handler := handlers[0].(map[string]interface{})
 	assert.Equal(t, "proxy", handler["handler"], "L4 handler should be proxy")
 
-	// Verify upstream points to sidecar bind address (127.0.0.1:9193)
+	// Verify upstream points to a sidecar bind address (localhost with dynamically allocated port)
 	upstreams, _ := handler["upstreams"].([]interface{})
 	require.NotEmpty(t, upstreams)
 	upstream := upstreams[0].(map[string]interface{})
 	dial := getL4ProxyUpstreamDial(upstream)
-	assert.Equal(t, "127.0.0.1:9193", dial,
-		"TCP sidecar upstream should point to local sidecar bind address")
+	assert.Contains(t, dial, "127.0.0.1:",
+		"TCP sidecar upstream should point to localhost sidecar bind address")
+	assert.NotContains(t, dial, "echo-tcp",
+		"TCP sidecar upstream should NOT point to direct service address")
 }
 
 // --- Post-TCP health check ---

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"go.uber.org/zap"
@@ -51,6 +52,10 @@ type ConsulRouter struct {
 	ServiceTag string `json:"service_tag,omitempty"`
 	ConnectTag string `json:"connect_tag,omitempty"`
 
+	// Connect port range for dynamic sidecar upstreams
+	ConnectPortStart int `json:"connect_port_range_start,omitempty"`
+	ConnectPortEnd   int `json:"connect_port_range_end,omitempty"`
+
 	// Data directory for runtime state (persisted across reloads)
 	DataDir string `json:"data_dir,omitempty"`
 
@@ -64,6 +69,7 @@ type ConsulRouter struct {
 	routeTable          *RouteTable          `json:"-"`
 	stateMgr            *stateManager        `json:"-"`
 	sidecarResolver     *SidecarResolver     `json:"-"`
+	upstreamMgr         *UpstreamManager     `json:"-"`
 	registrar           *ServiceRegistrar    `json:"-"`
 	sidecarWarnOnce     *sync.Once           `json:"-"`
 }
@@ -152,7 +158,18 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 	// Connect components
 	if boolVal(cr.ConnectProxyEnable) {
 		cr.sidecarResolver = NewSidecarResolver(consulClient, cr.logger, cr.ConnectServiceName)
+		cr.upstreamMgr = NewUpstreamManager(
+			consulClient, cr.logger, cr.ConnectServiceName,
+			cr.ConnectPortStart, cr.ConnectPortEnd,
+		)
 		cr.sidecarWarnOnce = &sync.Once{}
+
+		// Restore port allocations from persisted state
+		if cr.stateMgr != nil {
+			if allocs := cr.stateMgr.UpstreamAllocations(); len(allocs) > 0 {
+				cr.upstreamMgr.RestoreAllocations(allocs)
+			}
+		}
 
 		if boolVal(cr.ConnectAutoRegister) {
 			cr.registrar = NewServiceRegistrar(consulClient, cr.logger, cr.ConnectServiceName)
@@ -261,45 +278,88 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 	serviceProxyEnabled := boolVal(cr.ServiceProxyEnable)
 	connectProxyEnabled := boolVal(cr.ConnectProxyEnable)
 
+	// First pass: parse routes and identify Connect services that need sidecar upstreams
+	type parsedService struct {
+		routes []RouteDefinition
+	}
+	var parsedServices []parsedService
+	connectServices := make(map[string]bool)
+
 	for _, svc := range allServices {
 		routes := ParseServiceRoutes(svc, cr.logger)
+		parsedServices = append(parsedServices, parsedService{routes: routes})
 
-		// Determine upstream mode for each route
-		for i := range routes {
-			// Redirect routes don't need upstream resolution
-			if routes[i].IsRedirect() {
+		// Identify services that should use Connect (tagged with connect_tag)
+		if connectProxyEnabled {
+			for _, tag := range svc.Tags {
+				if tag == cr.ConnectTag {
+					for _, r := range routes {
+						if !r.IsRedirect() {
+							connectServices[r.ServiceName] = true
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	// Sync sidecar upstreams for Connect services (single Consul API call)
+	if connectProxyEnabled && cr.upstreamMgr != nil && len(connectServices) > 0 {
+		if changed, err := cr.upstreamMgr.SyncUpstreams(connectServices); err != nil {
+			cr.logger.Error("failed to sync sidecar upstreams",
+				zap.Error(err),
+			)
+		} else if changed {
+			// Brief wait for xDS propagation so Envoy opens listeners
+			// before SidecarResolver queries them
+			select {
+			case <-time.After(200 * time.Millisecond):
+			default:
+			}
+		}
+	}
+
+	// Second pass: determine upstream mode for each route
+	for _, ps := range parsedServices {
+		for i := range ps.routes {
+			if ps.routes[i].IsRedirect() {
 				continue
 			}
 
-			if connectProxyEnabled && cr.sidecarResolver != nil {
-				// Try sidecar resolution; if it succeeds, use connect-sidecar mode
-				if err := cr.sidecarResolver.ResolveUpstreams(&routes[i]); err == nil {
-					routes[i].UpstreamMode = UpstreamConnectSidecar
-					continue
+			// Connect services use sidecar routing
+			if connectProxyEnabled && connectServices[ps.routes[i].ServiceName] && cr.sidecarResolver != nil {
+				if err := cr.sidecarResolver.ResolveUpstreams(&ps.routes[i]); err == nil {
+					ps.routes[i].UpstreamMode = UpstreamConnectSidecar
 				} else {
-					// Warn once that connect proxy isn't working (avoid log spam)
 					cr.sidecarWarnOnce.Do(func() {
-						cr.logger.Warn("connect_proxy_enable is true but sidecar resolution is failing — falling back to direct routing. Ensure a sidecar proxy is running.",
+						cr.logger.Warn("connect_proxy_enable is true but sidecar resolution is failing — ensure Envoy sidecar is running",
 							zap.String("hint", "run: consul connect envoy -sidecar-for "+cr.ConnectServiceName),
 							zap.Error(err),
 						)
 					})
+					// Fall through to direct if enabled
+					if serviceProxyEnabled {
+						ps.routes[i].UpstreamMode = UpstreamDirect
+					} else {
+						ps.routes[i].Upstreams = nil
+					}
 				}
-				// Sidecar resolution failed — fall through to direct if enabled
+				continue
 			}
 
+			// Non-Connect services use direct routing
 			if serviceProxyEnabled {
-				routes[i].UpstreamMode = UpstreamDirect
+				ps.routes[i].UpstreamMode = UpstreamDirect
 			} else {
-				// Neither mode can route this service
 				cr.logger.Debug("no routing mode available for service; skipping",
-					zap.String("service", routes[i].ServiceName),
+					zap.String("service", ps.routes[i].ServiceName),
 				)
-				routes[i].Upstreams = nil
+				ps.routes[i].Upstreams = nil
 			}
 		}
 
-		allRoutes = append(allRoutes, routes...)
+		allRoutes = append(allRoutes, ps.routes...)
 	}
 
 	// Log route summary before compilation
@@ -362,6 +422,9 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		cr.stateMgr.SetCatalogIndex(cr.watcher.CatalogIndex())
 		cr.stateMgr.SetHealthStateIndex(cr.watcher.HealthStateIndex())
 		cr.stateMgr.SetPassingChecks(cr.watcher.PassingChecks())
+	}
+	if cr.upstreamMgr != nil {
+		cr.stateMgr.SetUpstreamAllocations(cr.upstreamMgr.Allocations())
 	}
 
 	// Pre-compute TCP hashes for persistence before applying

@@ -50,6 +50,8 @@ xcaddy build \
 | `debounce` | Debounce window for rapid Consul changes | `500ms` |
 | `service_tag` | Sentinel tag for service proxy discovery | `caddy-consul` |
 | `connect_tag` | Sentinel tag for connect proxy discovery | `caddy-consul-connect` |
+| `connect_port_range_start` | Start of port range for dynamic sidecar upstreams | `19000` |
+| `connect_port_range_end` | End of port range for dynamic sidecar upstreams | `29000` |
 | `caddy_admin_api` | Caddy admin API address for TCP route reconciliation | `localhost:2019` |
 | `data_dir` | Directory for runtime state (persisted across reloads) | `$XDG_DATA_HOME/caddy/caddy-consul` |
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
@@ -410,31 +412,64 @@ TCP routes automatically create L4 (caddy-l4) servers:
 
 The `service_proxy_enable` option controls whether Consul service discovery and routing is active (default: `true`). Set to `false` to disable service discovery entirely — no watcher, no routes.
 
-### Connect Proxy
+### Connect Proxy (Service Mesh)
 
-By default, Connect proxy is disabled (`connect_proxy_enable false`). Set `connect_proxy_enable true` to enable mesh integration via local sidecar proxies. When Connect proxy is disabled, no Connect components (sidecar resolver, auto-registration) are initialized.
+By default, Connect proxy is disabled (`connect_proxy_enable false`). Set `connect_proxy_enable true` to enable Consul Connect service mesh integration. caddy-consul will automatically manage Envoy sidecar upstream configuration — no manual upstream setup needed.
 
-**Note:** Only sidecar mode is supported. The Consul Connect native Go SDK (used for "direct" mTLS) is deprecated by HashiCorp. All connect traffic flows through the local sidecar proxy.
+**Mixed mode is fully supported**: services using direct routing (`caddy-consul` tag) and services using mesh routing (`caddy-consul-connect` tag) coexist in the same Caddy instance.
 
-When `connect_proxy_enable` is `true`, all discovered services are routed through sidecar proxies:
+#### How it works
 
 ```
-Client → Caddy → localhost:<bind_port> → Caddy's sidecar → mTLS → upstream sidecar → service
+Client → Caddy (TLS termination) → localhost:<port> → Envoy sidecar → mTLS → upstream service
 ```
 
-1. Caddy queries its own sidecar's `Proxy.Upstreams[]` for the target service's local bind port
-2. Traffic is forwarded to `localhost:<bind_port>` — plain TCP
-3. The sidecar handles mTLS, intentions, and cert rotation
+1. caddy-consul discovers services tagged `caddy-consul-connect`
+2. For each Connect service, caddy-consul **automatically allocates a local port** and registers it as an upstream in Consul
+3. Envoy detects the change via xDS and opens a local listener on that port
+4. caddy-consul's `SidecarResolver` discovers the bind port and routes traffic through it
+5. Envoy handles mTLS, certificate rotation, and intention enforcement
 
-**Requirements:**
-- Caddy must be registered as a service in Consul with a sidecar proxy (auto-registration handles this by default)
-- The sidecar must have upstream entries for each service Caddy needs to reach
-- A sidecar proxy process must be running (e.g., `consul connect proxy` or Envoy)
+#### Running the Envoy sidecar
+
+The Envoy sidecar must be running alongside Caddy. Start it with:
+
+```bash
+consul connect envoy \
+  -sidecar-for <connect_service_name> \
+  -http-addr <consul_addr> \
+  -token <consul_token>
+```
+
+Example:
+```bash
+consul connect envoy \
+  -sidecar-for my-ingress \
+  -http-addr http://127.0.0.1:8500 \
+  -token "$CONSUL_HTTP_TOKEN"
+```
+
+**Prerequisites:**
+- `consul` binary in PATH
+- `envoy` binary in PATH (install via `func-e use <version>`)
+- ACL token with `service:write` for `connect_service_name`
+- Local Consul agent running
+
+The sidecar is **stateless** — Consul is the source of truth. On restart, it re-bootstraps automatically. caddy-consul manages the upstream configuration dynamically via the Consul API; Envoy picks up changes via xDS without restart.
+
+#### Dynamic upstream management
+
+caddy-consul automatically manages Envoy's upstream list:
+- **New Connect service discovered** → port allocated, upstream added to Consul registration, Envoy opens listener
+- **Connect service removed** → upstream removed, Envoy closes listener, port freed
+- **Port range**: configurable via `connect_port_range_start` / `connect_port_range_end` (default: 19000-29000, supports 10,000 services)
+- **Port allocation**: deterministic hash-based, stable across restarts (persisted to state file)
 
 #### Connect Identity
 
-Caddy's identity in the mesh is set by `connect_service_name` (default: `<hostname>-caddy-consul`). This is the service name used for:
+Caddy's identity in the mesh is set by `connect_service_name` (default: `<hostname>-caddy-consul`). This is used for:
 - Sidecar proxy registration
+- Upstream management
 - Intention rules (source identity)
 
 Intentions are written as: `ALLOW <connect_service_name> → <upstream-service>`

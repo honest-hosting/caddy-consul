@@ -74,63 +74,54 @@ func TestIntegration_Connect_Sidecar_ServiceRegistered(t *testing.T) {
 	handler, ok := getReverseProxyHandler(route)
 	require.True(t, ok, "route should have a reverse_proxy handler")
 
-	// In sidecar mode, upstream should be localhost:<bind_port> (127.0.0.1:9191)
+	// In sidecar mode, upstream should be localhost with dynamically allocated port
 	upstreams := getReverseProxyUpstreams(handler)
 	require.NotEmpty(t, upstreams, "should have upstreams")
-	assert.Equal(t, "127.0.0.1:9191", upstreams[0],
-		"sidecar route upstream should point to local sidecar bind address")
+	assert.Contains(t, upstreams[0], "127.0.0.1:",
+		"sidecar route upstream should point to localhost sidecar bind address")
+	assert.NotContains(t, upstreams[0], "echo-connect",
+		"sidecar route upstream should NOT point to direct service address")
 
 	// Sidecar mode should NOT have TLS transport (sidecar handles mTLS)
 	assert.False(t, reverseProxyHasTLSTransport(handler),
 		"sidecar mode route should not have TLS transport (sidecar handles mTLS)")
 }
 
-func TestIntegration_Connect_Sidecar_NoUpstream(t *testing.T) {
+func TestIntegration_Connect_Sidecar_AutoUpstream(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	// Register backend with connect proxy enabled
-	err = registerConnectService(client, "echo-no-upstream", "echo-connect", 8080,
+	// Register backend with connect proxy enabled.
+	// With dynamic upstream management, caddy-consul automatically adds the
+	// upstream to the sidecar registration — no manual sidecar config needed.
+	err = registerConnectService(client, "echo-auto-upstream", "echo-connect", 8080,
 		map[string]string{
-			"caddy-host":     "no-upstream.localdev",
+			"caddy-host":     "auto-upstream.localdev",
 			"caddy-protocol": "http",
 		},
 	)
 	require.NoError(t, err)
 	defer func() {
-		_ = deregisterService(client, "echo-no-upstream")
-		_ = waitForHTTPRouteGone("no-upstream.localdev", 10*time.Second)
+		_ = deregisterService(client, "echo-auto-upstream")
+		_ = waitForHTTPRouteGone("auto-upstream.localdev", 10*time.Second)
 	}()
 
-	// Register Caddy's sidecar WITHOUT the upstream for this service
-	err = registerCaddySidecarWithUpstreams(client, []consul.Upstream{
-		{
-			DestinationName: "some-other-service",
-			LocalBindPort:   9999,
-		},
-	})
+	err = waitForConsulService(client, "echo-auto-upstream", 10*time.Second)
 	require.NoError(t, err)
 
-	// Wait for Consul to discover the service and caddy-consul to process it
-	err = waitForConsulService(client, "echo-no-upstream", 10*time.Second)
-	require.NoError(t, err)
-
-	// When connect_proxy_enable and service_proxy_enable are both true,
-	// sidecar resolution fails for this service (no upstream entry), so
-	// caddy-consul falls back to direct routing. The route should appear
-	// with the service's actual address (not a sidecar address).
-	route, err := waitForHTTPRoute("no-upstream.localdev", 15*time.Second)
-	require.NoError(t, err, "route should be injected via direct fallback when sidecar has no upstream")
+	// The route should appear with a sidecar address (localhost with dynamically allocated port)
+	route, err := waitForHTTPRoute("auto-upstream.localdev", 15*time.Second)
+	require.NoError(t, err, "connect route should be injected with auto-managed upstream")
 
 	handler, ok := getReverseProxyHandler(route)
 	require.True(t, ok)
 
 	upstreams := getReverseProxyUpstreams(handler)
 	require.NotEmpty(t, upstreams)
-	assert.Contains(t, upstreams[0], "8080",
-		"fallback direct route should point to actual service address")
-	assert.False(t, reverseProxyHasTLSTransport(handler),
-		"direct fallback route should not have TLS transport")
+	assert.Contains(t, upstreams[0], "127.0.0.1:",
+		"connect route should use sidecar localhost address")
+	assert.NotContains(t, upstreams[0], "echo-connect",
+		"connect route should NOT use direct service address")
 }
 
 func TestIntegration_Connect_Sidecar_ServiceDeregister(t *testing.T) {

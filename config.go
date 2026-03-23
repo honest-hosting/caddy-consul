@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,6 +30,8 @@ const (
 	DefaultCaddyAdminAPI       = "localhost:2019"
 	DefaultServiceTag          = "caddy-consul"
 	DefaultConnectTag          = "caddy-consul-connect"
+	DefaultConnectPortStart    = 19000
+	DefaultConnectPortEnd      = 29000
 
 	// MaxServiceNameLen is the max length for a Consul service name (DNS label).
 	MaxServiceNameLen = 63
@@ -75,6 +78,8 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    caddy_admin_api localhost:2019
 //	    service_tag caddy-consul
 //	    connect_tag caddy-consul-connect
+//	    connect_port_range_start 19000
+//	    connect_port_range_end 29000
 //	    data_dir /var/lib/caddy-consul
 //	    metrics /metrics/consul
 //	}
@@ -234,6 +239,26 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.ConnectTag = d.Val()
 
+		case "connect_port_range_start":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			val, err := strconv.Atoi(d.Val())
+			if err != nil || val < 1 {
+				return d.Errf("connect_port_range_start must be a positive integer, got '%s'", d.Val())
+			}
+			cr.ConnectPortStart = val
+
+		case "connect_port_range_end":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			val, err := strconv.Atoi(d.Val())
+			if err != nil || val < 1 {
+				return d.Errf("connect_port_range_end must be a positive integer, got '%s'", d.Val())
+			}
+			cr.ConnectPortEnd = val
+
 		case "data_dir":
 			if !d.NextArg() {
 				return d.ArgErr()
@@ -313,6 +338,12 @@ func (cr *ConsulRouter) applyDefaults() {
 	}
 	if cr.ConnectTag == "" {
 		cr.ConnectTag = DefaultConnectTag
+	}
+	if cr.ConnectPortStart == 0 {
+		cr.ConnectPortStart = DefaultConnectPortStart
+	}
+	if cr.ConnectPortEnd == 0 {
+		cr.ConnectPortEnd = DefaultConnectPortEnd
 	}
 	if cr.DataDir == "" {
 		cr.DataDir = filepath.Join(caddy.AppDataDir(), "caddy-consul")

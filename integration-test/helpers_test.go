@@ -126,13 +126,13 @@ func deregisterService(client *consul.Client, name string) error {
 }
 
 // registerConnectService registers a service with Connect sidecar enabled.
-// If metadata with caddy-* keys is provided, the "caddy-consul" sentinel tag
-// is added automatically for catalog-level discovery.
+// If metadata with caddy-* keys is provided, the "caddy-consul-connect" sentinel
+// tag is added automatically for catalog-level discovery with mesh routing.
 func registerConnectService(client *consul.Client, name, address string, port int, meta map[string]string) error {
 	var tags []string
 	for k := range meta {
 		if strings.HasPrefix(k, "caddy-") {
-			tags = []string{"caddy-consul"}
+			tags = []string{"caddy-consul-connect"}
 			break
 		}
 	}

@@ -41,6 +41,9 @@ type persistedState struct {
 	// TCP reconciler state
 	TCPServerHashes map[string]string `json:"tcp_server_hashes,omitempty"`
 	TCPServerNames  []string          `json:"tcp_server_names,omitempty"`
+
+	// Connect upstream port allocations: service name → local bind port
+	UpstreamAllocations map[string]int `json:"upstream_allocations,omitempty"`
 }
 
 // stateManager handles reading/writing persisted state to disk.
@@ -190,6 +193,20 @@ func (sm *stateManager) SetPassingChecks(checks map[string][]string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.state.PassingChecks = checks
+}
+
+// UpstreamAllocations returns the persisted Connect upstream port allocations.
+func (sm *stateManager) UpstreamAllocations() map[string]int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.state.UpstreamAllocations
+}
+
+// SetUpstreamAllocations updates the persisted upstream port allocations.
+func (sm *stateManager) SetUpstreamAllocations(allocs map[string]int) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.state.UpstreamAllocations = allocs
 }
 
 // CatalogIndex returns the persisted catalog watch index.
