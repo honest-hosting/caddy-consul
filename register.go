@@ -63,8 +63,9 @@ func (sr *ServiceRegistrar) Register() error {
 				Name:      sr.serviceName + " TTL",
 				ServiceID: sr.serviceName,
 				AgentServiceCheck: consul.AgentServiceCheck{
-					TTL:    "30s",
-					Status: consul.HealthPassing,
+					TTL:                            "30s",
+					Status:                         consul.HealthPassing,
+					DeregisterCriticalServiceAfter: "5m",
 				},
 			}
 			if err := sr.client.Agent().CheckRegister(check); err != nil {
@@ -86,9 +87,10 @@ func (sr *ServiceRegistrar) Register() error {
 			SidecarService: &consul.AgentServiceRegistration{},
 		},
 		Check: &consul.AgentServiceCheck{
-			CheckID: sr.serviceName + "-ttl",
-			TTL:     "30s",
-			Status:  consul.HealthPassing,
+			CheckID:                        sr.serviceName + "-ttl",
+			TTL:                            "30s",
+			Status:                         consul.HealthPassing,
+			DeregisterCriticalServiceAfter: "5m",
 		},
 	}
 
