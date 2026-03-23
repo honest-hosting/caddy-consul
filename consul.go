@@ -1,6 +1,7 @@
 package caddyconsul
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -173,6 +174,13 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 
 		if boolVal(cr.ConnectAutoRegister) {
 			cr.registrar = NewServiceRegistrar(consulClient, cr.logger, cr.ConnectServiceName)
+
+			// Deregister from Consul only on actual process exit, not config reloads.
+			// ctx.OnExit callbacks fire exclusively during process shutdown.
+			registrar := cr.registrar
+			ctx.OnExit(func(_ context.Context) {
+				registrar.Deregister()
+			})
 		}
 
 		// Warn if the sidecar proxy is not registered — connect routing won't work without it

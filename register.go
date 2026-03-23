@@ -108,11 +108,33 @@ func (sr *ServiceRegistrar) Register() error {
 
 // Stop stops the TTL updater. Does NOT deregister the service — registration
 // persists across config reloads. The TTL will eventually expire if Caddy
-// truly shuts down.
+// truly shuts down. Use Deregister() for clean removal on process exit.
 func (sr *ServiceRegistrar) Stop() {
 	sr.stopOnce.Do(func() {
 		close(sr.stopCh)
 	})
+}
+
+// Deregister removes the service and its sidecar proxy from Consul.
+// This should only be called on actual process exit, not on config reloads.
+func (sr *ServiceRegistrar) Deregister() {
+	sr.logger.Info("deregistering caddy service from consul",
+		zap.String("service_name", sr.serviceName),
+	)
+	if err := sr.client.Agent().ServiceDeregister(sr.serviceName); err != nil {
+		sr.logger.Warn("failed to deregister service from consul",
+			zap.String("service_name", sr.serviceName),
+			zap.Error(err),
+		)
+	}
+	// Consul auto-registers the sidecar proxy with this ID
+	sidecarID := sr.serviceName + "-sidecar-proxy"
+	if err := sr.client.Agent().ServiceDeregister(sidecarID); err != nil {
+		sr.logger.Warn("failed to deregister sidecar proxy from consul",
+			zap.String("sidecar_id", sidecarID),
+			zap.Error(err),
+		)
+	}
 }
 
 // ttlLoop periodically updates the TTL health check to keep the service passing.
