@@ -316,6 +316,7 @@ type consulRouteEntry struct {
 	Path         string `json:"Path"`
 	ServiceName  string `json:"ServiceName"`
 	StripPrefix  bool   `json:"StripPrefix"`
+	Via          string `json:"Via"`
 	RedirectCode int    `json:"RedirectCode"`
 	RedirectURL  string `json:"RedirectURL"`
 	Upstreams    []struct {
@@ -361,6 +362,7 @@ func findHTTPRouteByHost(host string) (map[string]interface{}, bool) {
 				"Host":         r.Host,
 				"Path":         r.Path,
 				"ServiceName":  r.ServiceName,
+				"Via":          r.Via,
 				"RedirectCode": float64(r.RedirectCode),
 				"RedirectURL":  r.RedirectURL,
 			}
@@ -461,6 +463,12 @@ func getReverseProxyUpstreams(route map[string]interface{}) []string {
 	return getRouteUpstreams(route)
 }
 
+// getRouteVia returns the Via field from a consul route.
+func getRouteVia(route map[string]interface{}) string {
+	via, _ := route["Via"].(string)
+	return via
+}
+
 // waitForHTTPRoute polls Caddy config until a route matching the host appears.
 func waitForHTTPRoute(host string, timeout time.Duration) (map[string]interface{}, error) {
 	deadline := time.Now().Add(timeout)
@@ -472,6 +480,47 @@ func waitForHTTPRoute(host string, timeout time.Duration) (map[string]interface{
 		time.Sleep(500 * time.Millisecond)
 	}
 	return nil, fmt.Errorf("HTTP route for host %s not found in Caddy config within %s", host, timeout)
+}
+
+// waitForHTTPRouteWithVia polls until a route with the expected Via value appears.
+func waitForHTTPRouteWithVia(host, expectedVia string, timeout time.Duration) (map[string]interface{}, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		route, found := findHTTPRouteByHost(host)
+		if found && getRouteVia(route) == expectedVia {
+			return route, nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("HTTP route for host %s with Via=%q not found within %s", host, expectedVia, timeout)
+}
+
+// waitForViaHeader polls an HTTP endpoint until the X-Caddy-Consul-Via response header matches.
+func waitForViaHeader(client *http.Client, url, expectedVia string, timeout time.Duration) (*http.Response, error) {
+	deadline := time.Now().Add(timeout)
+	var lastStatus int
+	var lastHeaders http.Header
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		lastStatus = resp.StatusCode
+		lastHeaders = resp.Header.Clone()
+		lastErr = nil
+		if resp.Header.Get("X-Caddy-Consul-Via") == expectedVia {
+			return resp, nil
+		}
+		_ = resp.Body.Close()
+		time.Sleep(500 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("X-Caddy-Consul-Via=%q not found at %s within %s (last error: %v)", expectedVia, url, timeout, lastErr)
+	}
+	return nil, fmt.Errorf("X-Caddy-Consul-Via=%q not found at %s within %s (last status: %d, last headers: %v)", expectedVia, url, timeout, lastStatus, lastHeaders)
 }
 
 // waitForHTTPRouteGone polls Caddy config until a route matching the host disappears.

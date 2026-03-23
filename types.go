@@ -131,6 +131,7 @@ type RouteDefinition struct {
 	StripPrefix  bool
 	Enabled      bool
 	Upstreams    []Upstream
+	Via          string // routing tag value for X-Caddy-Consul-Via header
 	RedirectCode int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
 	RedirectURL  string // redirect target URL template (may contain {http.request.uri})
 }
@@ -162,6 +163,7 @@ type CompiledHTTPRoute struct {
 	Upstreams    []Upstream
 	StripPrefix  bool
 	ServiceName  string
+	Via          string // routing tag for X-Caddy-Consul-Via response header
 	RedirectCode int
 	RedirectURL  string
 }

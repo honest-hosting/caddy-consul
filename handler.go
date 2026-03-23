@@ -87,7 +87,7 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		return next.ServeHTTP(w, r)
 	}
 
-	// Handle redirect routes
+	// Handle redirect routes — no Via header since redirects don't enter Consul/mesh
 	if route.RedirectCode > 0 && route.RedirectURL != "" {
 		location := expandRedirectURL(route.RedirectURL, r)
 		w.Header().Set("Location", location)
@@ -103,6 +103,9 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 			zap.String("path", route.Path),
 			zap.String("service", route.ServiceName),
 		)
+		if route.Via != "" {
+			w.Header().Set("X-Caddy-Consul-Via", route.Via)
+		}
 		w.WriteHeader(http.StatusBadGateway)
 		return nil
 	}
@@ -118,12 +121,22 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = h.transport
+	if route.Via != "" {
+		via := route.Via
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			resp.Header.Set("X-Caddy-Consul-Via", via)
+			return nil
+		}
+	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		h.logger.Error("proxy error",
 			zap.String("service", route.ServiceName),
 			zap.String("upstream", upstream.Address),
 			zap.Error(err),
 		)
+		if route.Via != "" {
+			w.Header().Set("X-Caddy-Consul-Via", route.Via)
+		}
 		w.WriteHeader(http.StatusBadGateway)
 	}
 

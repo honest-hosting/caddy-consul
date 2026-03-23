@@ -84,6 +84,7 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 				Path:         r.Path,
 				StripPrefix:  r.StripPrefix,
 				ServiceName:  r.ServiceName,
+				Via:          r.Via,
 				RedirectCode: r.RedirectCode,
 				RedirectURL:  r.RedirectURL,
 			})
@@ -113,6 +114,7 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 			Upstreams:   healthy,
 			StripPrefix: r.StripPrefix,
 			ServiceName: r.ServiceName,
+			Via:         r.Via,
 		})
 	}
 

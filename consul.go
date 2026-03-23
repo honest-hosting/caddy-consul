@@ -328,15 +328,24 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		}
 	}
 
-	// Second pass: determine upstream mode for each route
+	// Second pass: determine upstream mode and Via tag for each route
 	for _, ps := range parsedServices {
 		for i := range ps.routes {
 			if ps.routes[i].IsRedirect() {
 				continue
 			}
 
+			// Determine the Via tag based on whether this is a connect or direct service.
+			// Redirects are excluded — they never enter Consul or the mesh.
+			isConnect := connectProxyEnabled && connectServices[ps.routes[i].ServiceName]
+			if isConnect {
+				ps.routes[i].Via = cr.ConnectTag
+			} else if serviceProxyEnabled {
+				ps.routes[i].Via = cr.ServiceTag
+			}
+
 			// Connect services use sidecar routing
-			if connectProxyEnabled && connectServices[ps.routes[i].ServiceName] && cr.sidecarResolver != nil {
+			if isConnect && cr.sidecarResolver != nil {
 				if err := cr.sidecarResolver.ResolveUpstreams(&ps.routes[i]); err == nil {
 					ps.routes[i].UpstreamMode = UpstreamConnectSidecar
 				} else {
@@ -349,6 +358,7 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 					// Fall through to direct if enabled
 					if serviceProxyEnabled {
 						ps.routes[i].UpstreamMode = UpstreamDirect
+						ps.routes[i].Via = cr.ServiceTag
 					} else {
 						ps.routes[i].Upstreams = nil
 					}
