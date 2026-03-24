@@ -34,15 +34,20 @@ func (rt *RouteTable) Update(routes []CompiledHTTPRoute) {
 //  1. Exact host match takes priority over wildcard
 //  2. Longest path prefix wins among same-host matches
 //  3. Routes are pre-sorted by priority from the compiler
+//  4. Port-aware: if a route pattern includes a port, the request must match
+//     on host:port; if the pattern has no port, only the hostname is compared
 func (rt *RouteTable) Match(host, path string) *CompiledHTTPRoute {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
-	// Normalize: strip port from host if present (e.g., "example.com:443")
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
-	}
+	// Normalize host to lowercase, preserving port
 	host = strings.ToLower(host)
+
+	// Split host and port for routes that don't specify a port
+	hostOnly := host
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		hostOnly = host[:idx]
+	}
 
 	if path == "" {
 		path = "/"
@@ -50,31 +55,43 @@ func (rt *RouteTable) Match(host, path string) *CompiledHTTPRoute {
 
 	var bestMatch *CompiledHTTPRoute
 	bestPathLen := -1
+	bestHasPort := false // port-specific routes beat portless routes
 
 	for i := range rt.routes {
 		r := &rt.routes[i]
 
-		// Check host match
-		if !matchHost(r.Host, host) {
-			continue
+		// Check host match: if the route pattern contains a port, match
+		// against the full host:port; otherwise match hostname only.
+		hasPort := routeHasPort(r.Host)
+		if hasPort {
+			if !matchHost(r.Host, host) {
+				continue
+			}
+		} else {
+			if !matchHost(r.Host, hostOnly) {
+				continue
+			}
 		}
 
 		// Check path match (prefix matching)
 		routePath := r.Path
+		pathLen := 0
 		if routePath == "" || routePath == "/" {
 			// Root path matches everything
-			if bestMatch == nil || bestPathLen < 0 {
-				bestMatch = r
-				bestPathLen = 0
-			}
+			pathLen = 0
+		} else if strings.HasPrefix(path, routePath) {
+			pathLen = len(routePath)
+		} else {
 			continue
 		}
 
-		if strings.HasPrefix(path, routePath) {
-			if len(routePath) > bestPathLen {
-				bestMatch = r
-				bestPathLen = len(routePath)
-			}
+		// Prefer: (1) port-specific over portless, (2) longest path
+		if bestMatch == nil ||
+			(hasPort && !bestHasPort) ||
+			(hasPort == bestHasPort && pathLen > bestPathLen) {
+			bestMatch = r
+			bestPathLen = pathLen
+			bestHasPort = hasPort
 		}
 	}
 
@@ -95,6 +112,25 @@ func (rt *RouteTable) Len() int {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	return len(rt.routes)
+}
+
+// routeHasPort returns true if the host pattern contains a port suffix (e.g. ":8443").
+// Wildcard patterns like "*.example.com:8443" are also detected.
+func routeHasPort(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	// A port is present if the last ":" is followed only by digits
+	idx := strings.LastIndex(pattern, ":")
+	if idx < 0 || idx == len(pattern)-1 {
+		return false
+	}
+	for _, c := range pattern[idx+1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // matchHost checks if a route's host pattern matches the request host.

@@ -80,15 +80,33 @@ func TestRouteTable_Match_NoMatch(t *testing.T) {
 	assert.Nil(t, match)
 }
 
-func TestRouteTable_Match_StripsPort(t *testing.T) {
+func TestRouteTable_Match_PortAware(t *testing.T) {
 	rt := NewRouteTable()
 	rt.Update([]CompiledHTTPRoute{
-		{Host: "app.example.com", Path: "/", ServiceName: "app"},
+		{Host: "app.example.com", Path: "/", ServiceName: "no-port"},
+		{Host: "app.example.com:8443", Path: "/", ServiceName: "port-8443"},
+		{Host: "app.example.com:8000", Path: "/", ServiceName: "port-8000"},
 	})
 
+	// Route without port matches request regardless of port
 	match := rt.Match("app.example.com:443", "/")
 	require.NotNil(t, match)
-	assert.Equal(t, "app", match.ServiceName)
+	assert.Equal(t, "no-port", match.ServiceName)
+
+	// Route with port :8443 matches request with that port
+	match = rt.Match("app.example.com:8443", "/")
+	require.NotNil(t, match)
+	assert.Equal(t, "port-8443", match.ServiceName)
+
+	// Route with port :8000 matches request with that port
+	match = rt.Match("app.example.com:8000", "/")
+	require.NotNil(t, match)
+	assert.Equal(t, "port-8000", match.ServiceName)
+
+	// Request without port matches the no-port route
+	match = rt.Match("app.example.com", "/")
+	require.NotNil(t, match)
+	assert.Equal(t, "no-port", match.ServiceName)
 }
 
 func TestRouteTable_Match_CaseInsensitive(t *testing.T) {
@@ -138,6 +156,25 @@ func TestRouteTable_Routes_Snapshot(t *testing.T) {
 	match := rt.Match("a.com", "/")
 	require.NotNil(t, match)
 	assert.Equal(t, "a", match.ServiceName)
+}
+
+func TestRouteHasPort(t *testing.T) {
+	tests := []struct {
+		pattern string
+		want    bool
+	}{
+		{"", false},
+		{"example.com", false},
+		{"example.com:8443", true},
+		{"example.com:80", true},
+		{"*.example.com:8443", true},
+		{"*.example.com", false},
+		{"example.com:", false},
+	}
+	for _, tt := range tests {
+		got := routeHasPort(tt.pattern)
+		assert.Equal(t, tt.want, got, "routeHasPort(%q)", tt.pattern)
+	}
 }
 
 func TestMatchHost(t *testing.T) {
