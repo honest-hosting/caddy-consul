@@ -135,24 +135,24 @@ func TestValidate_Valid(t *testing.T) {
 }
 
 func TestValidate_InvalidHealthPolicy(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "bogus", ConflictPolicy: "reject", DebounceDuration: "500ms", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "bogus", ConflictPolicy: "reject", DebounceDuration: "500ms", ConsulScheme: "http", L4Mode: "global"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_InvalidConflictPolicy(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "bogus", DebounceDuration: "500ms", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "bogus", DebounceDuration: "500ms", ConsulScheme: "http", L4Mode: "global"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_InvalidDebounce(t *testing.T) {
-	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "reject", DebounceDuration: "not-a-duration", ConsulScheme: "http"}
+	cr := &ConsulRouter{HealthPolicy: "passing", ConflictPolicy: "reject", DebounceDuration: "not-a-duration", ConsulScheme: "http", L4Mode: "global"}
 	assert.Error(t, cr.validate())
 }
 
 func TestValidate_TLSCertWithoutKey(t *testing.T) {
 	cr := &ConsulRouter{
 		HealthPolicy: "passing", ConflictPolicy: "reject",
-		DebounceDuration: "500ms", ConsulScheme: "http",
+		DebounceDuration: "500ms", ConsulScheme: "http", L4Mode: "global",
 		ConsulTLSCert: "/path/cert.pem",
 	}
 	err := cr.validate()
@@ -180,4 +180,76 @@ func TestParsedHealthPolicy(t *testing.T) {
 func TestParsedDebounceDuration(t *testing.T) {
 	cr := &ConsulRouter{DebounceDuration: "1s"}
 	assert.Equal(t, 1_000_000_000, int(cr.parsedDebounceDuration()))
+}
+
+// --- l4_mode tests ---
+
+func TestUnmarshalCaddyfile_L4ModeGlobal(t *testing.T) {
+	input := `consul {
+		l4_mode global
+	}`
+	d := caddyfile.NewTestDispenser(input)
+	cr := &ConsulRouter{}
+	err := cr.UnmarshalCaddyfile(d)
+	require.NoError(t, err)
+	assert.Equal(t, "global", cr.L4Mode)
+}
+
+func TestUnmarshalCaddyfile_L4ModeNode(t *testing.T) {
+	input := `consul {
+		l4_mode node
+	}`
+	d := caddyfile.NewTestDispenser(input)
+	cr := &ConsulRouter{}
+	err := cr.UnmarshalCaddyfile(d)
+	require.NoError(t, err)
+	assert.Equal(t, "node", cr.L4Mode)
+}
+
+func TestUnmarshalCaddyfile_L4ModeInvalid(t *testing.T) {
+	input := `consul {
+		l4_mode bogus
+	}`
+	d := caddyfile.NewTestDispenser(input)
+	cr := &ConsulRouter{}
+	err := cr.UnmarshalCaddyfile(d)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l4_mode must be 'global' or 'node'")
+}
+
+func TestUnmarshalCaddyfile_L4NodeHostname(t *testing.T) {
+	input := `consul {
+		l4_mode node
+		l4_node_hostname worker-03.dc1
+	}`
+	d := caddyfile.NewTestDispenser(input)
+	cr := &ConsulRouter{}
+	err := cr.UnmarshalCaddyfile(d)
+	require.NoError(t, err)
+	assert.Equal(t, "node", cr.L4Mode)
+	assert.Equal(t, "worker-03.dc1", cr.L4NodeHostname)
+}
+
+func TestApplyDefaults_L4ModeDefaultsToGlobal(t *testing.T) {
+	cr := &ConsulRouter{}
+	cr.applyDefaults()
+	assert.Equal(t, DefaultL4Mode, cr.L4Mode)
+	assert.Equal(t, "global", cr.L4Mode)
+}
+
+func TestApplyDefaults_L4ModePreserved(t *testing.T) {
+	cr := &ConsulRouter{L4Mode: "node"}
+	cr.applyDefaults()
+	assert.Equal(t, "node", cr.L4Mode)
+}
+
+func TestValidate_L4ModeInvalid(t *testing.T) {
+	cr := &ConsulRouter{
+		HealthPolicy: "passing", ConflictPolicy: "reject",
+		DebounceDuration: "500ms", ConsulScheme: "http",
+		L4Mode: "bogus",
+	}
+	err := cr.validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "l4_mode must be 'global' or 'node'")
 }

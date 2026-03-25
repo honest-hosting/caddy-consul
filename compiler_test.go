@@ -310,3 +310,152 @@ func TestCompile_RedirectAndProxy_Coexist(t *testing.T) {
 	assert.Len(t, result.HTTPRoutes, 2)
 	assert.Empty(t, result.Conflicts)
 }
+
+// --- FilterTCPRoutesByNode tests ---
+
+func TestFilterTCPRoutesByNode_MatchingNode(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true, NodeName: "node-a"},
+				{Address: "10.0.0.2:5432", Healthy: true, NodeName: "node-b"},
+			},
+		},
+	}
+
+	filtered := FilterTCPRoutesByNode(routes, "node-a")
+	require.Len(t, filtered, 1)
+	// All upstreams preserved (not just local)
+	assert.Len(t, filtered[0].Upstreams, 2)
+}
+
+func TestFilterTCPRoutesByNode_NoMatchingNode(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true, NodeName: "node-a"},
+				{Address: "10.0.0.2:5432", Healthy: true, NodeName: "node-b"},
+			},
+		},
+	}
+
+	filtered := FilterTCPRoutesByNode(routes, "node-c")
+	assert.Empty(t, filtered)
+}
+
+func TestFilterTCPRoutesByNode_MixedNodes(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true, NodeName: "node-a"},
+			},
+		},
+		{
+			ServiceName: "redis",
+			Protocol:    ProtocolTCP,
+			Port:        6379,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.2:6379", Healthy: true, NodeName: "node-b"},
+			},
+		},
+	}
+
+	filtered := FilterTCPRoutesByNode(routes, "node-a")
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "postgres", filtered[0].ServiceName)
+}
+
+func TestFilterTCPRoutesByNode_HTTPRoutesUnaffected(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "web",
+			Protocol:    ProtocolHTTP,
+			Host:        "app.example.com",
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:8080", Healthy: true, NodeName: "node-b"},
+			},
+		},
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.2:5432", Healthy: true, NodeName: "node-b"},
+			},
+		},
+	}
+
+	// Filter for node-a: HTTP route should pass through, TCP should be dropped
+	filtered := FilterTCPRoutesByNode(routes, "node-a")
+	require.Len(t, filtered, 1)
+	assert.Equal(t, ProtocolHTTP, filtered[0].Protocol)
+	assert.Equal(t, "web", filtered[0].ServiceName)
+}
+
+func TestFilterTCPRoutesByNode_EmptyNodeName(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true, NodeName: "node-a"},
+			},
+		},
+	}
+
+	// Empty node name = no filtering (safety fallback)
+	filtered := FilterTCPRoutesByNode(routes, "")
+	assert.Len(t, filtered, 1)
+}
+
+func TestFilterTCPRoutesByNode_TLSPassthrough(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "tls-svc",
+			Protocol:    ProtocolTLSPassthrough,
+			Port:        8443,
+			Host:        "tls.example.com",
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:8443", Healthy: true, NodeName: "node-a"},
+			},
+		},
+	}
+
+	// TLS passthrough routes should also be filtered
+	filtered := FilterTCPRoutesByNode(routes, "node-b")
+	assert.Empty(t, filtered)
+
+	filtered = FilterTCPRoutesByNode(routes, "node-a")
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "tls-svc", filtered[0].ServiceName)
+}
+
+func TestFilterTCPRoutesByNode_PreservesAllUpstreams(t *testing.T) {
+	routes := []RouteDefinition{
+		{
+			ServiceName: "postgres",
+			Protocol:    ProtocolTCP,
+			Port:        5432,
+			Upstreams: []Upstream{
+				{Address: "10.0.0.1:5432", Healthy: true, NodeName: "node-a"},
+				{Address: "10.0.0.2:5432", Healthy: true, NodeName: "node-b"},
+				{Address: "10.0.0.3:5432", Healthy: true, NodeName: "node-c"},
+			},
+		},
+	}
+
+	// Even though only node-a is local, all 3 upstreams should be kept
+	filtered := FilterTCPRoutesByNode(routes, "node-a")
+	require.Len(t, filtered, 1)
+	assert.Len(t, filtered[0].Upstreams, 3)
+}

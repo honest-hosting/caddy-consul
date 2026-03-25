@@ -471,13 +471,14 @@ func (w *ConsulWatcher) fetchServiceHealth(name string) {
 		healthy := w.isHealthy(entry)
 
 		inst := ServiceInstance{
-			ID:      entry.Service.ID,
-			Address: serviceAddress(entry),
-			Port:    entry.Service.Port,
-			Tags:    entry.Service.Tags,
-			Meta:    entry.Service.Meta,
-			Healthy: healthy,
-			Weight:  1,
+			ID:       entry.Service.ID,
+			Address:  serviceAddress(entry),
+			Port:     entry.Service.Port,
+			Tags:     entry.Service.Tags,
+			Meta:     entry.Service.Meta,
+			Healthy:  healthy,
+			Weight:   1,
+			NodeName: entry.Node.Node,
 		}
 
 		if entry.Service.Weights.Passing > 0 {

@@ -479,3 +479,59 @@ func TestParseServiceRoutes_IndexedSNI(t *testing.T) {
 	assert.Equal(t, "db.example.com", routes[0].Host) // SNI maps to Host
 	assert.Equal(t, 5432, routes[0].Port)
 }
+
+// --- NodeName propagation tests ---
+
+func TestParseServiceRoutes_NodeNamePropagated_Indexed(t *testing.T) {
+	svc := &ServiceState{
+		Name: "tcp-svc",
+		Meta: map[string]string{
+			"caddy-route-0-protocol": "tcp",
+			"caddy-route-0-port":     "5432",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "node-a"},
+			{Address: "10.0.0.2", Port: 5432, Healthy: true, NodeName: "node-b"},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 1)
+	require.Len(t, routes[0].Upstreams, 2)
+	assert.Equal(t, "node-a", routes[0].Upstreams[0].NodeName)
+	assert.Equal(t, "node-b", routes[0].Upstreams[1].NodeName)
+}
+
+func TestParseServiceRoutes_NodeNamePropagated_NonIndexed(t *testing.T) {
+	svc := &ServiceState{
+		Name: "tcp-svc",
+		Meta: map[string]string{
+			"caddy-protocol": "tcp",
+			"caddy-port":     "5432",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "worker-01"},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 1)
+	require.Len(t, routes[0].Upstreams, 1)
+	assert.Equal(t, "worker-01", routes[0].Upstreams[0].NodeName)
+}
+
+func TestParseServiceRoutes_NodeNamePropagated_Fabio(t *testing.T) {
+	svc := &ServiceState{
+		Name: "tcp-svc",
+		Tags: []string{"urlprefix-:5432 proto=tcp"},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 9000, Healthy: true, NodeName: "node-x",
+				Tags: []string{"urlprefix-:5432 proto=tcp"}},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, testLogger())
+	require.Len(t, routes, 1)
+	require.Len(t, routes[0].Upstreams, 1)
+	assert.Equal(t, "node-x", routes[0].Upstreams[0].NodeName)
+}

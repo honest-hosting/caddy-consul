@@ -68,9 +68,10 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 				continue
 			}
 			upstreams = append(upstreams, Upstream{
-				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:  inst.Weight,
-				Healthy: true,
+				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:   inst.Weight,
+				Healthy:  true,
+				NodeName: inst.NodeName,
 			})
 		}
 		if len(upstreams) == 0 {
@@ -124,9 +125,10 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 			}
 
 			upstream := Upstream{
-				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:  inst.Weight,
-				Healthy: true,
+				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:   inst.Weight,
+				Healthy:  true,
+				NodeName: inst.NodeName,
 			}
 
 			if existing, ok := routeMap[key]; ok {
@@ -157,9 +159,10 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 				continue
 			}
 			upstreams = append(upstreams, Upstream{
-				Address: fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:  inst.Weight,
-				Healthy: true,
+				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+				Weight:   inst.Weight,
+				Healthy:  true,
+				NodeName: inst.NodeName,
 			})
 		}
 		if len(upstreams) == 0 {

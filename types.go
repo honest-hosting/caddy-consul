@@ -87,13 +87,14 @@ func (s *ServiceState) clone() *ServiceState {
 
 // ServiceInstance represents a single instance of a Consul service.
 type ServiceInstance struct {
-	ID      string
-	Address string
-	Port    int
-	Tags    []string
-	Meta    map[string]string
-	Healthy bool
-	Weight  int
+	ID       string
+	Address  string
+	Port     int
+	Tags     []string
+	Meta     map[string]string
+	Healthy  bool
+	Weight   int
+	NodeName string // Consul node name where this instance runs
 }
 
 // clone returns a deep copy of the ServiceInstance.
@@ -143,9 +144,10 @@ func (rd *RouteDefinition) IsRedirect() bool {
 
 // Upstream represents a single backend target.
 type Upstream struct {
-	Address string
-	Weight  int
-	Healthy bool
+	Address  string
+	Weight   int
+	Healthy  bool
+	NodeName string // Consul node name (used for l4_mode filtering; not serialized to Caddy)
 }
 
 // Conflict represents a detected route conflict.

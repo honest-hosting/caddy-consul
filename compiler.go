@@ -182,6 +182,40 @@ func httpRouteKey(host, path string) string {
 	return fmt.Sprintf("%s%s", host, path)
 }
 
+// FilterTCPRoutesByNode returns only routes that should be materialized on the
+// given node. TCP/TLS-passthrough routes are kept only if at least one upstream
+// runs on nodeName. When kept, ALL upstreams are preserved (not just local ones)
+// so Caddy can load-balance across the full set. HTTP/HTTPS routes pass through
+// unchanged. If nodeName is empty, all routes pass through (safety fallback).
+func FilterTCPRoutesByNode(routes []RouteDefinition, nodeName string) []RouteDefinition {
+	if nodeName == "" {
+		return routes
+	}
+
+	filtered := make([]RouteDefinition, 0, len(routes))
+	for _, r := range routes {
+		if r.Protocol != ProtocolTCP && r.Protocol != ProtocolTLSPassthrough {
+			// Non-TCP routes are not affected by l4_mode
+			filtered = append(filtered, r)
+			continue
+		}
+
+		// Check if any upstream is on this node
+		hasLocal := false
+		for _, u := range r.Upstreams {
+			if u.NodeName == nodeName {
+				hasLocal = true
+				break
+			}
+		}
+
+		if hasLocal {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
 func tcpRouteKey(port int, sni string) string {
 	if sni == "" {
 		return fmt.Sprintf(":%d", port)

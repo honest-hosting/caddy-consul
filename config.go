@@ -32,6 +32,7 @@ const (
 	DefaultConnectTag          = "caddy-consul-connect"
 	DefaultConnectPortStart    = 19000
 	DefaultConnectPortEnd      = 29000
+	DefaultL4Mode              = "global"
 
 	// MaxServiceNameLen is the max length for a Consul service name (DNS label).
 	MaxServiceNameLen = 63
@@ -82,6 +83,8 @@ func parseConsulGlobalOption(d *caddyfile.Dispenser, _ interface{}) (interface{}
 //	    connect_port_range_end 29000
 //	    data_dir /var/lib/caddy-consul
 //	    metrics /metrics/consul
+//	    l4_mode node
+//	    l4_node_hostname worker-03.dc1
 //	}
 func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume "consul"
@@ -271,6 +274,21 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.Metrics = d.Val()
 
+		case "l4_mode":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.L4Mode = d.Val()
+			if cr.L4Mode != "global" && cr.L4Mode != "node" {
+				return d.Errf("l4_mode must be 'global' or 'node', got '%s'", cr.L4Mode)
+			}
+
+		case "l4_node_hostname":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.L4NodeHostname = d.Val()
+
 		default:
 			return d.Errf("unrecognized consul option: %s", d.Val())
 		}
@@ -348,6 +366,9 @@ func (cr *ConsulRouter) applyDefaults() {
 	if cr.DataDir == "" {
 		cr.DataDir = filepath.Join(caddy.AppDataDir(), "caddy-consul")
 	}
+	if cr.L4Mode == "" {
+		cr.L4Mode = DefaultL4Mode
+	}
 }
 
 // validate checks that all configuration values are valid.
@@ -370,6 +391,12 @@ func (cr *ConsulRouter) validate() error {
 
 	if cr.ConsulScheme != "http" && cr.ConsulScheme != "https" {
 		return fmt.Errorf("scheme must be 'http' or 'https', got '%s'", cr.ConsulScheme)
+	}
+
+	switch cr.L4Mode {
+	case "global", "node":
+	default:
+		return fmt.Errorf("l4_mode must be 'global' or 'node', got '%s'", cr.L4Mode)
 	}
 
 	if cr.ConsulTLSCert != "" || cr.ConsulTLSKey != "" {

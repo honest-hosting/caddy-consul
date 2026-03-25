@@ -63,6 +63,12 @@ type ConsulRouter struct {
 	// Metrics
 	Metrics string `json:"metrics,omitempty"`
 
+	// Layer 4 mode: "global" (default) or "node"
+	// In "node" mode, TCP/L4 routes are only materialized for services that
+	// have at least one healthy instance on the local Consul node.
+	L4Mode         string `json:"l4_mode,omitempty"`
+	L4NodeHostname string `json:"l4_node_hostname,omitempty"` // explicit override for node identity
+
 	// Internal (not serialized)
 	watcher             *ConsulWatcher       `json:"-"`
 	compiler            *RouteCompiler       `json:"-"`
@@ -73,6 +79,7 @@ type ConsulRouter struct {
 	upstreamMgr         *UpstreamManager     `json:"-"`
 	registrar           *ServiceRegistrar    `json:"-"`
 	sidecarWarnOnce     *sync.Once           `json:"-"`
+	nodeName            string               `json:"-"` // resolved local node name for l4_mode=node
 }
 
 // RouteTable returns the shared route table for the consul_proxy handler.
@@ -111,12 +118,39 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 		zap.String("connect_service_name", cr.ConnectServiceName),
 		zap.Bool("connect_auto_register", boolVal(cr.ConnectAutoRegister)),
 		zap.String("debounce", cr.DebounceDuration),
+		zap.String("l4_mode", cr.L4Mode),
 	)
 
 	// Create Consul client
 	consulClient, err := cr.newConsulClient()
 	if err != nil {
 		return fmt.Errorf("caddy-consul: failed to create consul client: %w", err)
+	}
+
+	// Resolve local node name for l4_mode=node
+	if cr.L4Mode == "node" {
+		if cr.L4NodeHostname != "" {
+			cr.nodeName = cr.L4NodeHostname
+			cr.logger.Info("l4_mode=node: using configured hostname override",
+				zap.String("node_name", cr.nodeName),
+			)
+		} else {
+			self, err := consulClient.Agent().Self()
+			if err != nil {
+				return fmt.Errorf("caddy-consul: l4_mode is 'node' but failed to query Consul agent self: %w (hint: set l4_node_hostname to override)", err)
+			}
+			if cfg, ok := self["Config"]; ok {
+				if nodeName, ok := cfg["NodeName"].(string); ok && nodeName != "" {
+					cr.nodeName = nodeName
+				}
+			}
+			if cr.nodeName == "" {
+				return fmt.Errorf("caddy-consul: l4_mode is 'node' but Consul agent returned empty node name (hint: set l4_node_hostname to override)")
+			}
+			cr.logger.Info("l4_mode=node: resolved node name from Consul agent",
+				zap.String("node_name", cr.nodeName),
+			)
+		}
 	}
 
 	// Service discovery components
@@ -405,6 +439,21 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		zap.Int("redirect_routes", redirectCount),
 		zap.Int("healthy_upstreams", totalHealthy),
 	)
+
+	// Filter TCP routes by node locality if l4_mode=node
+	if cr.L4Mode == "node" && cr.nodeName != "" {
+		before := len(allRoutes)
+		allRoutes = FilterTCPRoutesByNode(allRoutes, cr.nodeName)
+		after := len(allRoutes)
+		if before != after {
+			cr.logger.Info("l4_mode=node: filtered TCP routes by local node",
+				zap.String("node", cr.nodeName),
+				zap.Int("before", before),
+				zap.Int("after", after),
+				zap.Int("filtered_out", before-after),
+			)
+		}
+	}
 
 	// Compile routes
 	compiled := cr.compiler.Compile(allRoutes)
