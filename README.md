@@ -55,6 +55,8 @@ xcaddy build \
 | `caddy_admin_api` | Caddy admin API address for TCP route reconciliation | `localhost:2019` |
 | `data_dir` | Directory for runtime state (persisted across reloads) | `$XDG_DATA_HOME/caddy/caddy-consul` |
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
+| `l4_mode` | Layer 4 routing mode: `global` or `node` | `global` |
+| `l4_node_hostname` | Explicit Consul node name override for `l4_mode=node` | _(auto-detected from agent)_ |
 
 Environment variables `CONSUL_HTTP_ADDR`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_SSL`, `CONSUL_CACERT`, `CONSUL_CLIENT_CERT`, and `CONSUL_CLIENT_KEY` are supported as fallbacks when the corresponding option is not set.
 
@@ -124,6 +126,14 @@ Minimal configuration:
         # Debounce window for rapid Consul changes (default: 500ms)
         debounce 500ms
 
+        # Layer 4 mode: "global" (default) or "node"
+        # In "node" mode, TCP/L4 routes are only created for services with
+        # at least one healthy instance on the local Consul node
+        l4_mode global
+
+        # Explicit node name override for l4_mode=node (default: auto-detected from Consul agent)
+        # l4_node_hostname worker-03.dc1
+
         # Enable metrics on admin API (optional)
         metrics /metrics/consul
     }
@@ -173,7 +183,9 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "connect_tag": "caddy-consul-connect",
       "caddy_admin_api": "localhost:2019",
       "data_dir": "/var/lib/caddy-consul",
-      "metrics": "/metrics/consul"
+      "metrics": "/metrics/consul",
+      "l4_mode": "global",
+      "l4_node_hostname": ""
     },
     "http": {
       "servers": {
@@ -407,6 +419,19 @@ TCP routes automatically create L4 (caddy-l4) servers:
 - `urlprefix-:5432 proto=tcp` creates a listener on port 5432
 - Multiple services on the same port are disambiguated by SNI matching
 - TLS passthrough forwards encrypted traffic without termination
+
+#### L4 Mode
+
+The `l4_mode` option controls how TCP/TLS-passthrough routes are materialized:
+
+| Mode | Behavior |
+|------|----------|
+| `global` (default) | All TCP/L4 routes are created regardless of which node Caddy runs on |
+| `node` | TCP/L4 routes are only created when at least one healthy upstream runs on the same Consul node as Caddy |
+
+In `node` mode, the plugin resolves the local Consul node name automatically from the agent. Use `l4_node_hostname` to override this with an explicit node name (useful when Caddy's hostname doesn't match the Consul node name).
+
+HTTP/HTTPS routes are unaffected by `l4_mode` and always pass through regardless of the setting.
 
 ### Service Proxy
 

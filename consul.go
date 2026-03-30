@@ -346,8 +346,40 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		}
 	}
 
-	// Sync sidecar upstreams for Connect services (single Consul API call)
-	if connectProxyEnabled && cr.upstreamMgr != nil && len(connectServices) > 0 {
+	// When l4_mode=node, filter Connect upstreams to only include services
+	// with at least one healthy instance on the local node. This prevents
+	// sidecar upstream entries from being registered on nodes where the
+	// workload doesn't run.
+	if cr.L4Mode == "node" && cr.nodeName != "" && connectProxyEnabled {
+		filtered := make(map[string]bool)
+		for svcName := range connectServices {
+			for _, ps := range parsedServices {
+				for _, r := range ps.routes {
+					if r.ServiceName != svcName {
+						continue
+					}
+					for _, u := range r.Upstreams {
+						if u.NodeName == cr.nodeName {
+							filtered[svcName] = true
+						}
+					}
+				}
+			}
+		}
+		if len(filtered) != len(connectServices) {
+			cr.logger.Info("l4_mode=node: filtered Connect upstreams by local node",
+				zap.String("node", cr.nodeName),
+				zap.Int("before", len(connectServices)),
+				zap.Int("after", len(filtered)),
+			)
+		}
+		connectServices = filtered
+	}
+
+	// Sync sidecar upstreams for Connect services (single Consul API call).
+	// We must call SyncUpstreams even when connectServices is empty so that
+	// stale upstreams get removed (e.g., workload moved off this node).
+	if connectProxyEnabled && cr.upstreamMgr != nil {
 		if changed, err := cr.upstreamMgr.SyncUpstreams(connectServices); err != nil {
 			cr.logger.Error("failed to sync sidecar upstreams",
 				zap.Error(err),
