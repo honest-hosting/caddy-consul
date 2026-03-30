@@ -47,7 +47,9 @@ func (sr *ServiceRegistrar) Register() error {
 
 		// Ensure the TTL check exists (it may have expired while Caddy was down,
 		// or been removed by a SyncUpstreams re-registration).
-		checkID := "service:" + sr.serviceName + "-ttl"
+		// Consul's UpdateTTL API accepts the original CheckID as registered,
+		// NOT the "service:"-prefixed form shown in the UI/Checks() map.
+		checkID := sr.serviceName + "-ttl"
 		if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
 			sr.logger.Info("TTL check not found on startup, re-registering",
 				zap.String("service", sr.serviceName),
@@ -66,10 +68,9 @@ func (sr *ServiceRegistrar) Register() error {
 			SidecarService: &consul.AgentServiceRegistration{},
 		},
 		Check: &consul.AgentServiceCheck{
-			CheckID:                        sr.serviceName + "-ttl",
-			TTL:                            "30s",
-			Status:                         consul.HealthPassing,
-			DeregisterCriticalServiceAfter: "5m",
+			CheckID: sr.serviceName + "-ttl",
+			TTL:     "30s",
+			Status:  consul.HealthPassing,
 		},
 	}
 
@@ -119,14 +120,14 @@ func (sr *ServiceRegistrar) Deregister() {
 }
 
 // ttlLoop periodically updates the TTL health check to keep the service passing.
-// The check ID is always "service:<name>-ttl" — Consul uses this prefix for checks
-// created as part of a ServiceRegister call, and we use the same ID when
-// re-registering a standalone check after expiry.
+// The check ID matches the raw CheckID from ServiceRegister (no "service:" prefix).
+// Consul's UpdateTTL API expects the original ID, not the prefixed form shown in
+// the Checks() map or UI.
 //
 // If the check disappears (e.g., SyncUpstreams re-registers the service without
 // the check), ttlLoop automatically re-creates it.
 func (sr *ServiceRegistrar) ttlLoop() {
-	checkID := "service:" + sr.serviceName + "-ttl"
+	checkID := sr.serviceName + "-ttl"
 	ticker := time.NewTicker(15 * time.Second) // update every 15s for a 30s TTL
 	defer ticker.Stop()
 
@@ -147,15 +148,41 @@ func (sr *ServiceRegistrar) ttlLoop() {
 
 // ensureCheck re-registers the TTL health check if it has been removed
 // (e.g., by a ServiceRegister call that didn't include the check).
+// If the service itself is gone, it re-registers the full service first.
 func (sr *ServiceRegistrar) ensureCheck(checkID string) {
+	// First check if the service still exists — if not, re-register it.
+	if _, _, err := sr.client.Agent().Service(sr.serviceName, nil); err != nil {
+		sr.logger.Warn("service gone from Consul, re-registering",
+			zap.String("service_name", sr.serviceName),
+		)
+		reg := &consul.AgentServiceRegistration{
+			ID:   sr.serviceName,
+			Name: sr.serviceName,
+			Connect: &consul.AgentServiceConnect{
+				SidecarService: &consul.AgentServiceRegistration{},
+			},
+			Check: &consul.AgentServiceCheck{
+				CheckID: checkID,
+				TTL:     "30s",
+				Status:  consul.HealthPassing,
+			},
+		}
+		if err := sr.client.Agent().ServiceRegister(reg); err != nil {
+			sr.logger.Warn("failed to re-register service",
+				zap.String("service_name", sr.serviceName),
+				zap.Error(err),
+			)
+		}
+		return
+	}
+
 	check := &consul.AgentCheckRegistration{
 		ID:        checkID,
 		Name:      sr.serviceName + " TTL",
 		ServiceID: sr.serviceName,
 		AgentServiceCheck: consul.AgentServiceCheck{
-			TTL:                            "30s",
-			Status:                         consul.HealthPassing,
-			DeregisterCriticalServiceAfter: "5m",
+			TTL:    "30s",
+			Status: consul.HealthPassing,
 		},
 	}
 	if err := sr.client.Agent().CheckRegister(check); err != nil {

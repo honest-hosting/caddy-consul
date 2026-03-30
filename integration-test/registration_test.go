@@ -10,10 +10,11 @@ import (
 )
 
 const (
-	// ttlCheckID is the canonical TTL check ID that Consul assigns when a check
-	// is registered as part of a ServiceRegister call. Consul prefixes the
-	// CheckID with "service:".
-	ttlCheckID = "service:" + connectServiceName + "-ttl"
+	// ttlCheckID is the raw CheckID as registered via ServiceRegister.
+	// Consul's UpdateTTL API expects this raw ID. The Checks() map may
+	// also expose it under a "service:"-prefixed key, but the raw ID is
+	// the canonical one for API operations.
+	ttlCheckID = connectServiceName + "-ttl"
 
 	// sidecarProxyID is the sidecar proxy service ID that Consul auto-creates.
 	sidecarProxyID = connectServiceName + "-sidecar-proxy"
@@ -37,18 +38,16 @@ func TestIntegration_Registration_TTLCheckIDConsistency(t *testing.T) {
 	client, err := newConsulClient()
 	require.NoError(t, err)
 
-	checks, err := client.Agent().Checks()
-	require.NoError(t, err)
-
-	// Verify the canonical TTL check (the one caddy-consul creates and updates)
-	// exists under the prefixed ID. Consul may also alias it under the raw ID
-	// and may have other TTL checks from test helpers — we only care that OUR
-	// check is present and passing.
-	check, ok := checks[ttlCheckID]
-	require.True(t, ok, "TTL check %s should exist", ttlCheckID)
-	assert.Equal(t, "passing", check.Status, "TTL check should be passing")
+	// Verify the TTL check exists under the raw CheckID and that
+	// UpdateTTL succeeds with it (this is the ID ttlLoop uses).
+	check, err := waitForConsulCheck(client, ttlCheckID, "passing", 10*time.Second)
+	require.NoError(t, err, "TTL check %s should exist and be passing", ttlCheckID)
 	assert.Equal(t, connectServiceName, check.ServiceID,
 		"TTL check should be associated with Caddy's connect service")
+
+	// Verify UpdateTTL works with the raw ID (this is what ttlLoop calls)
+	err = client.Agent().UpdateTTL(ttlCheckID, "integration test", consul.HealthPassing)
+	assert.NoError(t, err, "UpdateTTL should succeed with raw check ID %s", ttlCheckID)
 }
 
 func TestIntegration_Registration_TTLCheckSurvivesSyncUpstreams(t *testing.T) {
