@@ -593,6 +593,87 @@ func waitForCaddyTCPServerGone(serverName string, timeout time.Duration) error {
 	return fmt.Errorf("L4 server %s still present in Caddy config after %s", serverName, timeout)
 }
 
+// getConsulCheck returns a specific health check by ID from the local agent.
+func getConsulCheck(client *consul.Client, checkID string) (*consul.AgentCheck, error) {
+	checks, err := client.Agent().Checks()
+	if err != nil {
+		return nil, err
+	}
+	check, ok := checks[checkID]
+	if !ok {
+		return nil, fmt.Errorf("check %s not found", checkID)
+	}
+	return check, nil
+}
+
+// waitForConsulCheck polls until a check with the given ID exists and has the expected status.
+func waitForConsulCheck(client *consul.Client, checkID, status string, timeout time.Duration) (*consul.AgentCheck, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		check, err := getConsulCheck(client, checkID)
+		if err == nil && check.Status == status {
+			return check, nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("check %s not in status %s within %s", checkID, status, timeout)
+}
+
+// getConsulServiceProxy returns the Connect proxy config for a sidecar service.
+func getConsulServiceProxy(client *consul.Client, sidecarID string) (*consul.AgentServiceConnectProxyConfig, error) {
+	svc, _, err := client.Agent().Service(sidecarID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if svc == nil {
+		return nil, fmt.Errorf("service %s not found", sidecarID)
+	}
+	if svc.Proxy == nil {
+		return nil, fmt.Errorf("service %s has no proxy config", sidecarID)
+	}
+	return svc.Proxy, nil
+}
+
+// waitForUpstreamInSidecar polls until the sidecar proxy has an upstream with the given destination name.
+func waitForUpstreamInSidecar(client *consul.Client, sidecarID, destName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		proxy, err := getConsulServiceProxy(client, sidecarID)
+		if err == nil {
+			for _, u := range proxy.Upstreams {
+				if u.DestinationName == destName {
+					return nil
+				}
+			}
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("upstream %s not found in sidecar %s within %s", destName, sidecarID, timeout)
+}
+
+// waitForUpstreamGoneFromSidecar polls until the sidecar proxy no longer has an upstream with the given destination name.
+func waitForUpstreamGoneFromSidecar(client *consul.Client, sidecarID, destName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		proxy, err := getConsulServiceProxy(client, sidecarID)
+		if err != nil {
+			return nil // sidecar gone entirely
+		}
+		found := false
+		for _, u := range proxy.Upstreams {
+			if u.DestinationName == destName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("upstream %s still in sidecar %s after %s", destName, sidecarID, timeout)
+}
+
 // waitForConsulService polls Consul until a service is registered and has healthy instances.
 func waitForConsulService(client *consul.Client, name string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)

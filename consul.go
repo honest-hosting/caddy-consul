@@ -472,19 +472,39 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		zap.Int("healthy_upstreams", totalHealthy),
 	)
 
+	// Count routes by protocol type
+	var l4Count, httpCount int
+	for _, r := range allRoutes {
+		switch r.Protocol {
+		case ProtocolTCP, ProtocolTLSPassthrough:
+			l4Count++
+		case ProtocolHTTP, ProtocolHTTPS:
+			httpCount++
+		}
+	}
+
 	// Filter TCP routes by node locality if l4_mode=node
 	if cr.L4Mode == "node" && cr.nodeName != "" {
-		before := len(allRoutes)
+		l4Before := l4Count
 		allRoutes = FilterTCPRoutesByNode(allRoutes, cr.nodeName)
-		after := len(allRoutes)
-		if before != after {
-			cr.logger.Info("l4_mode=node: filtered TCP routes by local node",
-				zap.String("node", cr.nodeName),
-				zap.Int("before", before),
-				zap.Int("after", after),
-				zap.Int("filtered_out", before-after),
-			)
+		l4Count = 0
+		for _, r := range allRoutes {
+			if r.Protocol == ProtocolTCP || r.Protocol == ProtocolTLSPassthrough {
+				l4Count++
+			}
 		}
+		cr.logger.Info("l4_mode=node: filtered L4 routes by local node",
+			zap.String("node", cr.nodeName),
+			zap.Int("l4_before", l4Before),
+			zap.Int("l4_after", l4Count),
+			zap.Int("l4_filtered_out", l4Before-l4Count),
+			zap.Int("http_routes", httpCount),
+		)
+	} else {
+		cr.logger.Info("l4_mode=global: routing all L4 services",
+			zap.Int("l4_routes", l4Count),
+			zap.Int("http_routes", httpCount),
+		)
 	}
 
 	// Compile routes
