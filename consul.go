@@ -328,7 +328,7 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 	connectServices := make(map[string]bool)
 
 	for _, svc := range allServices {
-		routes := ParseServiceRoutes(svc, cr.logger)
+		routes := ParseServiceRoutes(svc, cr.ServiceTag, cr.ConnectTag, cr.logger)
 		parsedServices = append(parsedServices, parsedService{routes: routes})
 
 		// Identify services that should use Connect (tagged with connect_tag)

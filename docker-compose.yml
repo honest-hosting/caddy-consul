@@ -21,9 +21,9 @@ services:
       consul:
         condition: service_healthy
     ports:
-      - "8080:80"
-      - "8443:443"
-      - "8443:443/udp"  # HTTP/3 (QUIC)
+      - "9090:80"
+      - "9443:443"
+      - "9443:443/udp"  # HTTP/3 (QUIC)
       - "2019:2019"
       - "15432:15432"   # TCP test port (postgres-like)
       - "16432:16432"   # TCP test port (deregister test)

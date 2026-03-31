@@ -52,10 +52,10 @@ func TestConcurrent_MetadataParserParallel(t *testing.T) {
 					"caddy-protocol": "http",
 				},
 				Instances: []ServiceInstance{
-					{Address: fmt.Sprintf("10.0.0.%d", n%256), Port: 8080, Healthy: true, Weight: 1},
+					{Address: fmt.Sprintf("10.0.0.%d", n%256), Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
 				},
 			}
-			routes := ParseServiceRoutes(svc, testLogger())
+			routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
 			assert.Len(t, routes, 1)
 			assert.Equal(t, fmt.Sprintf("svc-%d.example.com", n), routes[0].Host)
 		}(i)
@@ -280,13 +280,13 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 				"caddy-weight":   "5",
 			},
 			Instances: []ServiceInstance{
-				{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1},
-				{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 2},
+				{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
+				{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 2, Tags: []string{"caddy-consul"}},
 			},
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, logger)
+			ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", logger)
 		}
 	})
 
@@ -298,12 +298,12 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 				"urlprefix-app.example.com/api strip=/api",
 			},
 			Instances: []ServiceInstance{
-				{Address: "10.0.0.1", Port: 8080, Healthy: true},
+				{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"urlprefix-app.example.com/", "urlprefix-app.example.com/api strip=/api"}},
 			},
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, logger)
+			ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", logger)
 		}
 	})
 
@@ -321,12 +321,12 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 				"caddy-route-2-path":     "/v2",
 			},
 			Instances: []ServiceInstance{
-				{Address: "10.0.0.1", Port: 8080, Healthy: true},
+				{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
 			},
 		}
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			ParseServiceRoutes(svc, logger)
+			ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", logger)
 		}
 	})
 }

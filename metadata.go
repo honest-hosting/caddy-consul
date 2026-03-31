@@ -15,7 +15,12 @@ var indexedKeyRegex = regexp.MustCompile(`^caddy-route-(\d+)-(.+)$`)
 // ParseServiceRoutes extracts RouteDefinitions from a service's metadata and tags.
 // Metadata keys take precedence over tags. If indexed keys (caddy-route-N-*) exist,
 // non-indexed keys (caddy-*) are ignored.
-func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition {
+//
+// Only instances whose own Tags contain serviceTag (or connectTag) — or whose own
+// Meta contains caddy-* keys — are included as upstreams. This prevents unrelated
+// instances registered under the same Consul service name (e.g. metrics sidecars,
+// database containers) from being added to the upstream pool.
+func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger *zap.Logger) []RouteDefinition {
 	if svc == nil || len(svc.Instances) == 0 {
 		return nil
 	}
@@ -64,7 +69,7 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 			if !inst.Healthy || inst.Address == "" {
 				continue
 			}
-			if !instanceHasRoutingConfig(inst, true) {
+			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, true) {
 				continue
 			}
 			upstreams = append(upstreams, Upstream{
@@ -100,6 +105,9 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 
 		for _, inst := range svc.Instances {
 			if !inst.Healthy || inst.Address == "" {
+				continue
+			}
+			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, true) {
 				continue
 			}
 
@@ -155,7 +163,7 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 			if !inst.Healthy || inst.Address == "" {
 				continue
 			}
-			if !instanceHasRoutingConfig(inst, false) {
+			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, false) {
 				continue
 			}
 			upstreams = append(upstreams, Upstream{
@@ -189,19 +197,43 @@ func ParseServiceRoutes(svc *ServiceState, logger *zap.Logger) []RouteDefinition
 	return enabled
 }
 
-// instanceHasRoutingConfig checks if a specific service instance has routing
-// configuration. For Fabio-based routing, checks for urlprefix- tags. For
-// metadata-based routing, all instances of the service are considered valid
-// (metadata is merged across instances).
-func instanceHasRoutingConfig(inst ServiceInstance, usesMetadata bool) bool {
+// instanceHasRoutingConfig checks if a specific service instance should be
+// included as an upstream. For metadata-based routing, the instance must carry
+// the service_tag or connect_tag in its own Tags, or have caddy-* keys in its
+// own Meta. For Fabio-based routing, the instance must have urlprefix- tags.
+func instanceHasRoutingConfig(inst ServiceInstance, serviceTag, connectTag string, usesMetadata bool) bool {
 	if usesMetadata {
-		// Metadata-based routing: all instances are valid upstreams since
-		// metadata is defined at the service level, not per-instance.
-		return true
+		if instanceHasTag(inst, serviceTag) || instanceHasTag(inst, connectTag) {
+			return true
+		}
+		return hasAnyCaddyMeta(inst.Meta)
 	}
 	// Fabio tag-based routing: only instances with urlprefix- tags
 	for _, tag := range inst.Tags {
 		if strings.HasPrefix(tag, "urlprefix-") {
+			return true
+		}
+	}
+	return false
+}
+
+// instanceHasTag returns true if the instance's own Tags contain the given tag.
+func instanceHasTag(inst ServiceInstance, tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for _, t := range inst.Tags {
+		if t == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAnyCaddyMeta returns true if the metadata map contains any caddy-* keys.
+func hasAnyCaddyMeta(meta map[string]string) bool {
+	for k := range meta {
+		if strings.HasPrefix(k, "caddy-") {
 			return true
 		}
 	}

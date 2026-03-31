@@ -18,8 +18,8 @@ import (
 
 const (
 	consulAddr = "127.0.0.1:8500"
-	caddyHTTP  = "127.0.0.1:8080"
-	caddyHTTPS = "127.0.0.1:8443"
+	caddyHTTP  = "127.0.0.1:9090"
+	caddyHTTPS = "127.0.0.1:9443"
 	caddyAdmin = "127.0.0.1:2019"
 
 	// testDomain is the default *.localdev hostname for TLS tests.
