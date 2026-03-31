@@ -31,18 +31,18 @@ func TestParseServiceRoutes_NoHealthyInstances(t *testing.T) {
 }
 
 func TestParseServiceRoutes_NonIndexedMeta(t *testing.T) {
+	meta := map[string]string{
+		"caddy-protocol":     "http",
+		"caddy-host":         "app.example.com",
+		"caddy-path":         "/api",
+		"caddy-priority":     "100",
+		"caddy-weight":       "5",
+		"caddy-strip-prefix": "true",
+	}
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{
-			"caddy-protocol":     "http",
-			"caddy-host":         "app.example.com",
-			"caddy-path":         "/api",
-			"caddy-priority":     "100",
-			"caddy-weight":       "5",
-			"caddy-strip-prefix": "true",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -63,17 +63,17 @@ func TestParseServiceRoutes_NonIndexedMeta(t *testing.T) {
 }
 
 func TestParseServiceRoutes_IndexedMeta(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-protocol": "http",
+		"caddy-route-0-host":     "web.example.com",
+		"caddy-route-0-path":     "/",
+		"caddy-route-1-protocol": "tcp",
+		"caddy-route-1-port":     "5432",
+	}
 	svc := &ServiceState{
 		Name: "multi",
-		Meta: map[string]string{
-			"caddy-route-0-protocol": "http",
-			"caddy-route-0-host":     "web.example.com",
-			"caddy-route-0-path":     "/",
-			"caddy-route-1-protocol": "tcp",
-			"caddy-route-1-port":     "5432",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -89,15 +89,15 @@ func TestParseServiceRoutes_IndexedMeta(t *testing.T) {
 }
 
 func TestParseServiceRoutes_IndexedWinsOverNonIndexed(t *testing.T) {
+	meta := map[string]string{
+		"caddy-host":             "nonindexed.example.com",
+		"caddy-route-0-host":     "indexed.example.com",
+		"caddy-route-0-protocol": "http",
+	}
 	svc := &ServiceState{
 		Name: "mixed",
-		Meta: map[string]string{
-			"caddy-host":             "nonindexed.example.com",
-			"caddy-route-0-host":     "indexed.example.com",
-			"caddy-route-0-protocol": "http",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -109,12 +109,10 @@ func TestParseServiceRoutes_IndexedWinsOverNonIndexed(t *testing.T) {
 func TestParseServiceRoutes_MetadataWinsOverFabio(t *testing.T) {
 	svc := &ServiceState{
 		Name: "mixed",
-		Tags: []string{"urlprefix-fabio.example.com/"},
-		Meta: map[string]string{
-			"caddy-host": "meta.example.com",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true,
+				Tags: []string{"caddy-consul", "urlprefix-fabio.example.com/"},
+				Meta: map[string]string{"caddy-host": "meta.example.com"}},
 		},
 	}
 
@@ -184,11 +182,9 @@ func TestParseServiceRoutes_FabioHTTPS(t *testing.T) {
 func TestParseServiceRoutes_DefaultModeDirect(t *testing.T) {
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{
-			"caddy-host": "web.example.com",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{"caddy-host": "web.example.com"}},
 		},
 	}
 
@@ -200,12 +196,9 @@ func TestParseServiceRoutes_DefaultModeDirect(t *testing.T) {
 func TestParseServiceRoutes_DisabledRoute(t *testing.T) {
 	svc := &ServiceState{
 		Name: "disabled",
-		Meta: map[string]string{
-			"caddy-host":    "disabled.example.com",
-			"caddy-enabled": "false",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{"caddy-host": "disabled.example.com", "caddy-enabled": "false"}},
 		},
 	}
 
@@ -214,13 +207,13 @@ func TestParseServiceRoutes_DisabledRoute(t *testing.T) {
 }
 
 func TestParseServiceRoutes_MultipleUpstreams(t *testing.T) {
+	meta := map[string]string{"caddy-host": "example.com"}
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{"caddy-host": "example.com"},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 3, Tags: []string{"caddy-consul"}},
-			{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
-			{Address: "10.0.0.3", Port: 8080, Healthy: false, Tags: []string{"caddy-consul"}}, // unhealthy, excluded
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 3, Tags: []string{"caddy-consul"}, Meta: meta},
+			{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta},
+			{Address: "10.0.0.3", Port: 8080, Healthy: false, Tags: []string{"caddy-consul"}, Meta: meta}, // unhealthy, excluded
 		},
 	}
 
@@ -276,14 +269,12 @@ func TestParseServiceRoutes_PerInstanceMetadata(t *testing.T) {
 func TestParseServiceRoutes_SharedMetadata_MultipleUpstreams(t *testing.T) {
 	// Multiple instances with the SAME caddy metadata should produce
 	// one route with multiple upstreams (load balancing).
+	meta := map[string]string{"caddy-host": "app.example.com"}
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{
-			"caddy-host": "app.example.com",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
-			{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta},
+			{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -405,13 +396,13 @@ func TestParseFabioTag_PortStripNonStandard(t *testing.T) {
 func TestParseServiceRoutes_NativeRedirect(t *testing.T) {
 	svc := &ServiceState{
 		Name: "redirect-svc",
-		Meta: map[string]string{
-			"caddy-host":          "old.example.com",
-			"caddy-redirect-code": "301",
-			"caddy-redirect-url":  "https://new.example.com{http.request.uri}",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":          "old.example.com",
+					"caddy-redirect-code": "301",
+					"caddy-redirect-url":  "https://new.example.com{http.request.uri}",
+				}},
 		},
 	}
 
@@ -424,17 +415,17 @@ func TestParseServiceRoutes_NativeRedirect(t *testing.T) {
 }
 
 func TestParseServiceRoutes_IndexedRedirect(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-host":          "old.example.com",
+		"caddy-route-0-redirect-code": "301",
+		"caddy-route-0-redirect-url":  "https://new.example.com{http.request.uri}",
+		"caddy-route-1-host":          "app.example.com",
+		"caddy-route-1-path":          "/api",
+	}
 	svc := &ServiceState{
 		Name: "multi-redirect",
-		Meta: map[string]string{
-			"caddy-route-0-host":          "old.example.com",
-			"caddy-route-0-redirect-code": "301",
-			"caddy-route-0-redirect-url":  "https://new.example.com{http.request.uri}",
-			"caddy-route-1-host":          "app.example.com",
-			"caddy-route-1-path":          "/api",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -461,15 +452,15 @@ func TestParseServiceRoutes_NoRoutingMetadata(t *testing.T) {
 }
 
 func TestParseServiceRoutes_IndexedSNI(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-protocol": "tls-passthrough",
+		"caddy-route-0-port":     "5432",
+		"caddy-route-0-sni":      "db.example.com",
+	}
 	svc := &ServiceState{
 		Name: "db",
-		Meta: map[string]string{
-			"caddy-route-0-protocol": "tls-passthrough",
-			"caddy-route-0-port":     "5432",
-			"caddy-route-0-sni":      "db.example.com",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 5432, Healthy: true, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -483,15 +474,15 @@ func TestParseServiceRoutes_IndexedSNI(t *testing.T) {
 // --- NodeName propagation tests ---
 
 func TestParseServiceRoutes_NodeNamePropagated_Indexed(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-protocol": "tcp",
+		"caddy-route-0-port":     "5432",
+	}
 	svc := &ServiceState{
 		Name: "tcp-svc",
-		Meta: map[string]string{
-			"caddy-route-0-protocol": "tcp",
-			"caddy-route-0-port":     "5432",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "node-a", Tags: []string{"caddy-consul"}},
-			{Address: "10.0.0.2", Port: 5432, Healthy: true, NodeName: "node-b", Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "node-a", Tags: []string{"caddy-consul"}, Meta: meta},
+			{Address: "10.0.0.2", Port: 5432, Healthy: true, NodeName: "node-b", Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -505,12 +496,9 @@ func TestParseServiceRoutes_NodeNamePropagated_Indexed(t *testing.T) {
 func TestParseServiceRoutes_NodeNamePropagated_NonIndexed(t *testing.T) {
 	svc := &ServiceState{
 		Name: "tcp-svc",
-		Meta: map[string]string{
-			"caddy-protocol": "tcp",
-			"caddy-port":     "5432",
-		},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "worker-01", Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 5432, Healthy: true, NodeName: "worker-01", Tags: []string{"caddy-consul"},
+				Meta: map[string]string{"caddy-protocol": "tcp", "caddy-port": "5432"}},
 		},
 	}
 
@@ -543,16 +531,15 @@ func TestParseServiceRoutes_Indexed_OnlyTaggedInstancesAreUpstreams(t *testing.T
 	// The metrics sidecar and database container should NOT be upstreams.
 	svc := &ServiceState{
 		Name: "frontend",
-		Tags: []string{"caddy-consul"}, // union of all instance tags
-		Meta: map[string]string{
-			"caddy-route-0-protocol": "http",
-			"caddy-route-0-host":     "frontend.example.com",
-		},
 		Instances: []ServiceInstance{
 			{
 				ID: "frontend-web", Address: "10.0.0.1", Port: 25112,
 				Healthy: true, Weight: 1,
 				Tags: []string{"caddy-consul", "frontend"},
+				Meta: map[string]string{
+					"caddy-route-0-protocol": "http",
+					"caddy-route-0-host":     "frontend.example.com",
+				},
 			},
 			{
 				ID: "frontend-metrics", Address: "10.0.0.1", Port: 28902,
@@ -576,11 +563,10 @@ func TestParseServiceRoutes_Indexed_OnlyTaggedInstancesAreUpstreams(t *testing.T
 func TestParseServiceRoutes_NonIndexed_OnlyTaggedInstancesAreUpstreams(t *testing.T) {
 	svc := &ServiceState{
 		Name: "app",
-		Tags: []string{"caddy-consul"},
-		Meta: map[string]string{"caddy-host": "app.example.com"},
 		Instances: []ServiceInstance{
 			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1,
-				Tags: []string{"caddy-consul"}},
+				Tags: []string{"caddy-consul"},
+				Meta: map[string]string{"caddy-host": "app.example.com"}},
 			{Address: "10.0.0.2", Port: 9090, Healthy: true, Weight: 1,
 				Tags: []string{"monitoring"}},
 		},
@@ -596,11 +582,10 @@ func TestParseServiceRoutes_ConnectTagInstanceIncluded(t *testing.T) {
 	// Instance with the connect tag should also be included as an upstream.
 	svc := &ServiceState{
 		Name: "mesh-svc",
-		Tags: []string{"caddy-consul-connect"},
-		Meta: map[string]string{"caddy-host": "mesh.example.com"},
 		Instances: []ServiceInstance{
 			{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1,
-				Tags: []string{"caddy-consul-connect"}},
+				Tags: []string{"caddy-consul-connect"},
+				Meta: map[string]string{"caddy-host": "mesh.example.com"}},
 			{Address: "10.0.0.2", Port: 9090, Healthy: true, Weight: 1,
 				Tags: []string{"sidecar"}},
 		},
@@ -641,12 +626,12 @@ func TestParseServiceRoutes_InstanceWithCaddyMetaButNoTag(t *testing.T) {
 
 func TestParseServiceRoutes_UnhealthyTaggedInstanceExcluded(t *testing.T) {
 	// Even with the correct tag, unhealthy instances must not be upstreams.
+	meta := map[string]string{"caddy-host": "web.example.com"}
 	svc := &ServiceState{
 		Name: "web",
-		Meta: map[string]string{"caddy-host": "web.example.com"},
 		Instances: []ServiceInstance{
-			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
-			{Address: "10.0.0.2", Port: 8080, Healthy: false, Tags: []string{"caddy-consul"}},
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
+			{Address: "10.0.0.2", Port: 8080, Healthy: false, Tags: []string{"caddy-consul"}, Meta: meta},
 		},
 	}
 
@@ -673,4 +658,240 @@ func TestParseServiceRoutes_NoTaggedInstances_ReturnsNil(t *testing.T) {
 
 	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
 	assert.Nil(t, routes, "no routes when no instances have the service tag or caddy-* meta")
+}
+
+// --- Instance-first routing tests ---
+
+func TestParseServiceRoutes_MixedInstanceMeta_DifferentRoutes(t *testing.T) {
+	// Core bug scenario: 3 instances under one service, each with different
+	// caddy metadata. Should produce 3 separate routes (2 HTTP + 1 TCP),
+	// each with only its own instance as upstream.
+	svc := &ServiceState{
+		Name: "mywp-site",
+		Tags: []string{"caddy-consul"},
+		Meta: map[string]string{
+			// Service-level meta is the union from the watcher — but each
+			// instance's own meta should take precedence for its own route.
+			"caddy-host":             "filemanager.example.com:8443",
+			"caddy-port":             "40000",
+			"caddy-protocol":         "http",
+			"caddy-route-0-host":     "frontend.example.com:8443",
+			"caddy-route-0-protocol": "http",
+			"external-source":        "nomad",
+		},
+		Instances: []ServiceInstance{
+			{
+				ID: "filemanager-frontend", Address: "10.0.0.1", Port: 26662,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":     "filemanager.example.com:8443",
+					"caddy-protocol": "http",
+					"external-source": "nomad",
+				},
+			},
+			{
+				ID: "filemanager-sftp", Address: "10.0.0.1", Port: 29117,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-port":     "40000",
+					"caddy-protocol": "tcp",
+					"external-source": "nomad",
+				},
+			},
+			{
+				ID: "frontend", Address: "10.0.0.1", Port: 26283,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul", "frontend"},
+				Meta: map[string]string{
+					"caddy-route-0-host":     "frontend.example.com:8443",
+					"caddy-route-0-protocol": "http",
+					"external-source":        "nomad",
+				},
+			},
+			{
+				ID: "frontend-metrics", Address: "10.0.0.1", Port: 26749,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-mywordpress-metrics"},
+				Meta: map[string]string{"external-source": "nomad"},
+			},
+			{
+				ID: "database", Address: "10.0.0.1", Port: 30905,
+				Healthy: true, Weight: 1, Tags: []string{"database"},
+				Meta: map[string]string{"external-source": "nomad"},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+
+	// Should produce 3 routes: HTTP for filemanager, TCP for sftp, HTTP for frontend
+	require.Len(t, routes, 3, "should produce 3 separate routes for 3 differently-configured instances")
+
+	// Build a lookup by protocol+host+port for easy assertions
+	type routeID struct {
+		protocol Protocol
+		host     string
+		port     int
+	}
+	routeByID := make(map[routeID]RouteDefinition)
+	for _, r := range routes {
+		routeByID[routeID{r.Protocol, r.Host, r.Port}] = r
+	}
+
+	// Filemanager HTTP route
+	fm, ok := routeByID[routeID{ProtocolHTTP, "filemanager.example.com:8443", 0}]
+	require.True(t, ok, "should have HTTP route for filemanager")
+	require.Len(t, fm.Upstreams, 1)
+	assert.Equal(t, "10.0.0.1:26662", fm.Upstreams[0].Address)
+
+	// SFTP TCP route
+	sftp, ok := routeByID[routeID{ProtocolTCP, "", 40000}]
+	require.True(t, ok, "should have TCP route on port 40000")
+	require.Len(t, sftp.Upstreams, 1)
+	assert.Equal(t, "10.0.0.1:29117", sftp.Upstreams[0].Address)
+
+	// Frontend HTTP route (indexed)
+	fe, ok := routeByID[routeID{ProtocolHTTP, "frontend.example.com:8443", 0}]
+	require.True(t, ok, "should have HTTP route for frontend")
+	require.Len(t, fe.Upstreams, 1)
+	assert.Equal(t, "10.0.0.1:26283", fe.Upstreams[0].Address)
+}
+
+func TestParseServiceRoutes_MixedIndexedAndNonIndexed_AcrossInstances(t *testing.T) {
+	// One instance uses indexed metadata, another uses non-indexed.
+	// Each should produce its own route independently.
+	svc := &ServiceState{
+		Name: "mixed-styles",
+		Instances: []ServiceInstance{
+			{
+				ID: "indexed-inst", Address: "10.0.0.1", Port: 8080,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-route-0-host":     "indexed.example.com",
+					"caddy-route-0-protocol": "http",
+				},
+			},
+			{
+				ID: "nonindexed-inst", Address: "10.0.0.2", Port: 9090,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":     "nonindexed.example.com",
+					"caddy-protocol": "http",
+				},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 2, "each instance should produce its own route")
+
+	hosts := map[string]string{}
+	for _, r := range routes {
+		require.Len(t, r.Upstreams, 1)
+		hosts[r.Host] = r.Upstreams[0].Address
+	}
+	assert.Equal(t, "10.0.0.1:8080", hosts["indexed.example.com"])
+	assert.Equal(t, "10.0.0.2:9090", hosts["nonindexed.example.com"])
+}
+
+func TestParseServiceRoutes_FabioPerInstance_DifferentURLPrefixes(t *testing.T) {
+	// Two instances with different urlprefix tags should produce separate routes.
+	svc := &ServiceState{
+		Name: "multi-fabio",
+		Tags: []string{
+			"urlprefix-app.example.com/",
+			"urlprefix-api.example.com/",
+		},
+		Instances: []ServiceInstance{
+			{
+				ID: "app", Address: "10.0.0.1", Port: 8080,
+				Healthy: true, Weight: 1,
+				Tags: []string{"urlprefix-app.example.com/"},
+			},
+			{
+				ID: "api", Address: "10.0.0.2", Port: 9090,
+				Healthy: true, Weight: 1,
+				Tags: []string{"urlprefix-api.example.com/"},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 2, "each instance should produce its own Fabio route")
+
+	hosts := map[string]string{}
+	for _, r := range routes {
+		require.Len(t, r.Upstreams, 1, "each Fabio route should have only its own instance")
+		hosts[r.Host] = r.Upstreams[0].Address
+	}
+	assert.Equal(t, "10.0.0.1:8080", hosts["app.example.com"])
+	assert.Equal(t, "10.0.0.2:9090", hosts["api.example.com"])
+}
+
+func TestParseServiceRoutes_ServiceMetaAsDefault_InstanceOverride(t *testing.T) {
+	// Service has caddy-protocol: http. Instance overrides with caddy-protocol: tcp.
+	svc := &ServiceState{
+		Name: "override-test",
+		Meta: map[string]string{
+			"caddy-protocol": "http",
+			"caddy-host":     "override.example.com",
+		},
+		Instances: []ServiceInstance{
+			{
+				ID: "tcp-inst", Address: "10.0.0.1", Port: 5432,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-protocol": "tcp",
+					"caddy-port":     "5432",
+				},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 1)
+	assert.Equal(t, ProtocolTCP, routes[0].Protocol, "instance meta should override service meta")
+	assert.Equal(t, 5432, routes[0].Port)
+}
+
+func TestParseServiceRoutes_UntaggedInstanceExcluded_EvenWithServiceMeta(t *testing.T) {
+	// Service has caddy-host in svc.Meta. Instance has no tag, no caddy-* meta.
+	// Should NOT produce a route (the eligibility guard prevents inheritance).
+	svc := &ServiceState{
+		Name: "guard-test",
+		Meta: map[string]string{
+			"caddy-host": "guard.example.com",
+		},
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"worker"}},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	assert.Nil(t, routes, "untagged instance without caddy-* meta should not inherit service-level routes")
+}
+
+func TestParseServiceRoutes_IdenticalRoutes_GroupedUpstreams(t *testing.T) {
+	// Two instances with identical routing config (same host, same protocol)
+	// should be grouped into one route with two upstreams.
+	meta := map[string]string{
+		"caddy-route-0-host":     "grouped.example.com",
+		"caddy-route-0-protocol": "http",
+	}
+	svc := &ServiceState{
+		Name: "grouped",
+		Instances: []ServiceInstance{
+			{
+				ID: "inst-a", Address: "10.0.0.1", Port: 8080,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta,
+			},
+			{
+				ID: "inst-b", Address: "10.0.0.2", Port: 8080,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta,
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 1, "identical routes should be grouped")
+	assert.Len(t, routes[0].Upstreams, 2, "grouped route should have both upstreams")
+	assert.Equal(t, "grouped.example.com", routes[0].Host)
 }

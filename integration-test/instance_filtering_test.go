@@ -202,3 +202,93 @@ func TestIntegration_InstanceFiltering_FabioTag_OnlyURLPrefixInstances(t *testin
 	require.Len(t, upstreams, 1, "only the instance with urlprefix tag should be an upstream")
 	assert.Contains(t, upstreams[0], ":8080")
 }
+
+// TestIntegration_InstanceFiltering_MixedMeta_SeparateRoutes verifies that
+// instances under the same service name with different caddy metadata produce
+// separate routes, each with only its own instance as upstream.
+func TestIntegration_InstanceFiltering_MixedMeta_SeparateRoutes(t *testing.T) {
+	client, err := newConsulClient()
+	require.NoError(t, err)
+
+	svcName := "multi-meta-routes"
+	host1 := "multi-meta-frontend.localdev"
+	host2 := "multi-meta-filemanager.localdev"
+
+	// Instance 1: HTTP frontend with indexed metadata
+	reg1 := &consul.AgentServiceRegistration{
+		ID:      svcName + "-frontend",
+		Name:    svcName,
+		Address: "echo-http",
+		Port:    8080,
+		Tags:    []string{"caddy-consul", "frontend"},
+		Meta: map[string]string{
+			"caddy-route-0-host":     host1,
+			"caddy-route-0-protocol": "http",
+		},
+		Check: &consul.AgentServiceCheck{
+			TCP:      "echo-http:8080",
+			Interval: "1s",
+			Timeout:  "1s",
+		},
+	}
+
+	// Instance 2: HTTP filemanager with non-indexed metadata (different host)
+	reg2 := &consul.AgentServiceRegistration{
+		ID:      svcName + "-filemanager",
+		Name:    svcName,
+		Address: "echo-http",
+		Port:    8080,
+		Tags:    []string{"caddy-consul"},
+		Meta: map[string]string{
+			"caddy-host":     host2,
+			"caddy-protocol": "http",
+		},
+		Check: &consul.AgentServiceCheck{
+			TCP:      "echo-http:8080",
+			Interval: "1s",
+			Timeout:  "1s",
+		},
+	}
+
+	// Instance 3: metrics sidecar — no caddy-consul tag, should NOT produce a route
+	reg3 := &consul.AgentServiceRegistration{
+		ID:      svcName + "-metrics",
+		Name:    svcName,
+		Address: "echo-http",
+		Port:    9090,
+		Tags:    []string{"metrics"},
+		Meta: map[string]string{
+			"external-source": "nomad",
+		},
+		Check: &consul.AgentServiceCheck{
+			TCP:      "echo-http:8080",
+			Interval: "1s",
+			Timeout:  "1s",
+		},
+	}
+
+	require.NoError(t, client.Agent().ServiceRegister(reg1))
+	require.NoError(t, client.Agent().ServiceRegister(reg2))
+	require.NoError(t, client.Agent().ServiceRegister(reg3))
+	defer func() {
+		_ = client.Agent().ServiceDeregister(reg1.ID)
+		_ = client.Agent().ServiceDeregister(reg2.ID)
+		_ = client.Agent().ServiceDeregister(reg3.ID)
+		_ = waitForHTTPRouteGone(host1, 10*time.Second)
+		_ = waitForHTTPRouteGone(host2, 10*time.Second)
+	}()
+
+	// Both routes should appear independently
+	route1, err := waitForHTTPRoute(host1, 15*time.Second)
+	require.NoError(t, err, "route for %s should appear", host1)
+
+	route2, err := waitForHTTPRoute(host2, 15*time.Second)
+	require.NoError(t, err, "route for %s should appear", host2)
+
+	// Each route should have exactly 1 upstream (its own instance)
+	upstreams1 := getRouteUpstreams(route1)
+	require.Len(t, upstreams1, 1, "frontend route should have exactly 1 upstream")
+
+	upstreams2 := getRouteUpstreams(route2)
+	require.Len(t, upstreams2, 1, "filemanager route should have exactly 1 upstream")
+}

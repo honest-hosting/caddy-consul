@@ -13,208 +13,167 @@ import (
 var indexedKeyRegex = regexp.MustCompile(`^caddy-route-(\d+)-(.+)$`)
 
 // ParseServiceRoutes extracts RouteDefinitions from a service's metadata and tags.
-// Metadata keys take precedence over tags. If indexed keys (caddy-route-N-*) exist,
-// non-indexed keys (caddy-*) are ignored.
 //
-// Only instances whose own Tags contain serviceTag (or connectTag) — or whose own
-// Meta contains caddy-* keys — are included as upstreams. This prevents unrelated
-// instances registered under the same Consul service name (e.g. metrics sidecars,
-// database containers) from being added to the upstream pool.
+// Each instance is processed independently — its effective metadata is built by
+// merging service-level meta (svc.Meta) with instance-level meta (inst.Meta wins).
+// Routes are parsed from that per-instance metadata, and the instance becomes the
+// sole upstream for its own routes. Instances that produce identical route
+// definitions (same host, path, protocol, port, etc.) are grouped into one route
+// with multiple upstreams for load balancing.
+//
+// Precedence per instance: indexed (caddy-route-N-*) > non-indexed (caddy-*) > Fabio (urlprefix-).
+//
+// An instance is only considered if it has the serviceTag/connectTag in its Tags,
+// or has caddy-* keys in its own Meta, or has urlprefix-* in its own Tags.
 func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger *zap.Logger) []RouteDefinition {
 	if svc == nil || len(svc.Instances) == 0 {
 		return nil
 	}
 
-	// Merge metadata from all instances (first instance wins for conflicts)
-	meta := mergeInstanceMeta(svc)
-
-	// Check for indexed keys first
-	indexedRoutes := parseIndexedMeta(meta)
-	hasIndexed := len(indexedRoutes) > 0
-
-	// Check for non-indexed caddy-* metadata
-	hasNonIndexed := hasNonIndexedMeta(meta)
-
-	// Check for Fabio urlprefix- tags
-	fabioRoutes, skippedPortRedirects := parseFabioTags(svc.Tags)
-	hasFabio := len(fabioRoutes) > 0
-
-	if skippedPortRedirects > 0 {
-		logger.Warn("skipped port-qualified redirect tags (Caddy handles HTTP→HTTPS automatically)",
-			zap.String("service", svc.Name),
-			zap.Int("skipped", skippedPortRedirects),
-		)
+	// Phase 1: Extract routes from each instance independently.
+	type instanceRoute struct {
+		route    RouteDefinition
+		upstream Upstream
 	}
+	var allRoutes []instanceRoute
 
-	if hasIndexed && hasNonIndexed {
-		logger.Warn("service has both indexed (caddy-route-N-*) and non-indexed (caddy-*) metadata; using indexed keys only",
-			zap.String("service", svc.Name),
-		)
-	}
-
-	if (hasIndexed || hasNonIndexed) && hasFabio {
-		logger.Warn("service has both caddy metadata and Fabio urlprefix tags; using metadata only",
-			zap.String("service", svc.Name),
-		)
-	}
-
-	var routes []RouteDefinition
-
-	switch {
-	case hasIndexed:
-		routes = indexedRoutes
-		// Indexed routes use merged metadata — shared upstreams
-		var upstreams []Upstream
-		for _, inst := range svc.Instances {
-			if !inst.Healthy || inst.Address == "" {
-				continue
-			}
-			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, true) {
-				continue
-			}
-			upstreams = append(upstreams, Upstream{
-				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:   inst.Weight,
-				Healthy:  true,
-				NodeName: inst.NodeName,
-			})
-		}
-		if len(upstreams) == 0 {
-			return nil
-		}
-		for i := range routes {
-			routes[i].ServiceName = svc.Name
-			routes[i].Upstreams = upstreams
-			routes[i].UpstreamMode = UpstreamDirect
+	for _, inst := range svc.Instances {
+		if !inst.Healthy || inst.Address == "" {
+			continue
 		}
 
-	case hasNonIndexed:
-		// Non-indexed metadata: build effective metadata per instance by merging
-		// service-level meta with instance-level meta (instance overrides service).
-		// Group instances by their effective routing key (host+port+protocol) to
-		// handle both shared metadata (multiple upstreams) and per-instance
-		// metadata (e.g., multiple minecraft servers with different ports).
-		type routeKey struct {
-			host     string
-			path     string
-			port     int
-			protocol string
+		// Eligibility: instance must signal routing intent via tag or metadata.
+		instHasTag := instanceHasTag(inst, serviceTag) || instanceHasTag(inst, connectTag)
+		instHasCaddyMeta := hasAnyCaddyMeta(inst.Meta)
+		instHasFabioTags := hasAnyFabioTag(inst.Tags)
+		if !instHasTag && !instHasCaddyMeta && !instHasFabioTags {
+			continue
 		}
-		routeMap := make(map[routeKey]*RouteDefinition)
-		var routeOrder []routeKey
 
-		for _, inst := range svc.Instances {
-			if !inst.Healthy || inst.Address == "" {
-				continue
-			}
-			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, true) {
-				continue
-			}
+		// Use the instance's own metadata for route parsing. svc.Meta is NOT
+		// used as a base because it is an aggregate of all instance metadata
+		// built by the watcher (first-instance-wins merge), not a distinct
+		// service-level configuration. Merging it would cross-contaminate
+		// routing config between unrelated instances.
+		effectiveMeta := inst.Meta
 
-			// Build effective metadata: service-level + instance-level (instance wins)
-			effectiveMeta := make(map[string]string)
-			for k, v := range svc.Meta {
-				effectiveMeta[k] = v
-			}
-			for k, v := range inst.Meta {
-				effectiveMeta[k] = v
-			}
+		upstream := Upstream{
+			Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
+			Weight:   inst.Weight,
+			Healthy:  true,
+			NodeName: inst.NodeName,
+		}
 
-			if !hasNonIndexedMeta(effectiveMeta) {
-				continue
-			}
+		// Determine routing source for this instance (indexed > non-indexed > fabio).
+		indexedRoutes := parseIndexedMeta(effectiveMeta)
+		hasIndexed := len(indexedRoutes) > 0
+		hasNonIndexed := hasNonIndexedMeta(effectiveMeta)
+		fabioRoutes, skippedPortRedirects := parseFabioTags(inst.Tags)
+		hasFabio := len(fabioRoutes) > 0
 
+		if skippedPortRedirects > 0 {
+			logger.Warn("skipped port-qualified redirect tags (Caddy handles HTTP→HTTPS automatically)",
+				zap.String("service", svc.Name),
+				zap.String("instance", inst.ID),
+				zap.Int("skipped", skippedPortRedirects),
+			)
+		}
+
+		if hasIndexed && hasNonIndexed {
+			logger.Debug("instance has both indexed and non-indexed metadata; using indexed keys only",
+				zap.String("service", svc.Name),
+				zap.String("instance", inst.ID),
+			)
+		}
+
+		if (hasIndexed || hasNonIndexed) && hasFabio {
+			logger.Debug("instance has both caddy metadata and Fabio urlprefix tags; using metadata only",
+				zap.String("service", svc.Name),
+				zap.String("instance", inst.ID),
+			)
+		}
+
+		var routes []RouteDefinition
+		switch {
+		case hasIndexed:
+			routes = indexedRoutes
+		case hasNonIndexed:
 			rd := parseNonIndexedMeta(effectiveMeta)
-			key := routeKey{
-				host:     rd.Host,
-				path:     rd.Path,
-				port:     rd.Port,
-				protocol: string(rd.Protocol),
-			}
-
-			upstream := Upstream{
-				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:   inst.Weight,
-				Healthy:  true,
-				NodeName: inst.NodeName,
-			}
-
-			if existing, ok := routeMap[key]; ok {
-				// Same route key — add as additional upstream
-				existing.Upstreams = append(existing.Upstreams, upstream)
-			} else {
-				rd.ServiceName = svc.Name
-				rd.UpstreamMode = UpstreamDirect
-				rd.Upstreams = []Upstream{upstream}
-				routeMap[key] = &rd
-				routeOrder = append(routeOrder, key)
-			}
+			routes = []RouteDefinition{rd}
+		case hasFabio:
+			routes = fabioRoutes
+		default:
+			continue
 		}
 
-		for _, key := range routeOrder {
-			routes = append(routes, *routeMap[key])
+		for _, r := range routes {
+			r.ServiceName = svc.Name
+			r.UpstreamMode = UpstreamDirect
+			allRoutes = append(allRoutes, instanceRoute{route: r, upstream: upstream})
 		}
+	}
 
-	case hasFabio:
-		routes = fabioRoutes
-		// Fabio routes: only instances with urlprefix- tags are upstreams
-		var upstreams []Upstream
-		for _, inst := range svc.Instances {
-			if !inst.Healthy || inst.Address == "" {
-				continue
-			}
-			if !instanceHasRoutingConfig(inst, serviceTag, connectTag, false) {
-				continue
-			}
-			upstreams = append(upstreams, Upstream{
-				Address:  fmt.Sprintf("%s:%d", inst.Address, inst.Port),
-				Weight:   inst.Weight,
-				Healthy:  true,
-				NodeName: inst.NodeName,
-			})
-		}
-		if len(upstreams) == 0 {
-			return nil
-		}
-		for i := range routes {
-			routes[i].ServiceName = svc.Name
-			routes[i].Upstreams = upstreams
-			routes[i].UpstreamMode = UpstreamDirect
-		}
-
-	default:
+	if len(allRoutes) == 0 {
 		return nil
 	}
 
-	// Filter out disabled routes
-	var enabled []RouteDefinition
-	for _, r := range routes {
-		if r.Enabled {
-			enabled = append(enabled, r)
+	// Phase 2: Group identical routes so multiple instances serving the same
+	// route definition share upstreams (load balancing).
+	type routeSignature struct {
+		protocol     Protocol
+		host         string
+		path         string
+		port         int
+		priority     int
+		weight       int
+		stripPrefix  bool
+		enabled      bool
+		redirectCode int
+		redirectURL  string
+	}
+	type groupedRoute struct {
+		route     RouteDefinition
+		upstreams []Upstream
+	}
+	routeMap := make(map[routeSignature]*groupedRoute)
+	var routeOrder []routeSignature
+
+	for _, ir := range allRoutes {
+		sig := routeSignature{
+			protocol:     ir.route.Protocol,
+			host:         ir.route.Host,
+			path:         ir.route.Path,
+			port:         ir.route.Port,
+			priority:     ir.route.Priority,
+			weight:       ir.route.Weight,
+			stripPrefix:  ir.route.StripPrefix,
+			enabled:      ir.route.Enabled,
+			redirectCode: ir.route.RedirectCode,
+			redirectURL:  ir.route.RedirectURL,
 		}
+		if existing, ok := routeMap[sig]; ok {
+			existing.upstreams = append(existing.upstreams, ir.upstream)
+		} else {
+			routeMap[sig] = &groupedRoute{
+				route:     ir.route,
+				upstreams: []Upstream{ir.upstream},
+			}
+			routeOrder = append(routeOrder, sig)
+		}
+	}
+
+	// Phase 3: Assemble final routes, filtering disabled.
+	var enabled []RouteDefinition
+	for _, sig := range routeOrder {
+		gr := routeMap[sig]
+		if !gr.route.Enabled {
+			continue
+		}
+		gr.route.Upstreams = gr.upstreams
+		enabled = append(enabled, gr.route)
 	}
 
 	return enabled
-}
-
-// instanceHasRoutingConfig checks if a specific service instance should be
-// included as an upstream. For metadata-based routing, the instance must carry
-// the service_tag or connect_tag in its own Tags, or have caddy-* keys in its
-// own Meta. For Fabio-based routing, the instance must have urlprefix- tags.
-func instanceHasRoutingConfig(inst ServiceInstance, serviceTag, connectTag string, usesMetadata bool) bool {
-	if usesMetadata {
-		if instanceHasTag(inst, serviceTag) || instanceHasTag(inst, connectTag) {
-			return true
-		}
-		return hasAnyCaddyMeta(inst.Meta)
-	}
-	// Fabio tag-based routing: only instances with urlprefix- tags
-	for _, tag := range inst.Tags {
-		if strings.HasPrefix(tag, "urlprefix-") {
-			return true
-		}
-	}
-	return false
 }
 
 // instanceHasTag returns true if the instance's own Tags contain the given tag.
@@ -240,26 +199,14 @@ func hasAnyCaddyMeta(meta map[string]string) bool {
 	return false
 }
 
-// mergeInstanceMeta collects metadata from all instances. Service-level meta takes
-// precedence (from svc.Meta), then individual instance meta is merged.
-func mergeInstanceMeta(svc *ServiceState) map[string]string {
-	merged := make(map[string]string)
-
-	// Instance-level meta (first instance wins for duplicates)
-	for _, inst := range svc.Instances {
-		for k, v := range inst.Meta {
-			if _, exists := merged[k]; !exists {
-				merged[k] = v
-			}
+// hasAnyFabioTag returns true if the tag list contains any urlprefix-* tags.
+func hasAnyFabioTag(tags []string) bool {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, "urlprefix-") {
+			return true
 		}
 	}
-
-	// Service-level meta overrides instance-level
-	for k, v := range svc.Meta {
-		merged[k] = v
-	}
-
-	return merged
+	return false
 }
 
 // hasNonIndexedMeta checks if there are any non-indexed caddy-* metadata keys.

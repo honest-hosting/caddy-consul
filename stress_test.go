@@ -47,12 +47,13 @@ func TestConcurrent_MetadataParserParallel(t *testing.T) {
 			defer wg.Done()
 			svc := &ServiceState{
 				Name: fmt.Sprintf("svc-%d", n),
-				Meta: map[string]string{
-					"caddy-host":     fmt.Sprintf("svc-%d.example.com", n),
-					"caddy-protocol": "http",
-				},
 				Instances: []ServiceInstance{
-					{Address: fmt.Sprintf("10.0.0.%d", n%256), Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
+					{Address: fmt.Sprintf("10.0.0.%d", n%256), Port: 8080, Healthy: true, Weight: 1,
+						Tags: []string{"caddy-consul"},
+						Meta: map[string]string{
+							"caddy-host":     fmt.Sprintf("svc-%d.example.com", n),
+							"caddy-protocol": "http",
+						}},
 				},
 			}
 			routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
@@ -270,18 +271,18 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 	logger := testLogger()
 
 	b.Run("metadata", func(b *testing.B) {
+		meta := map[string]string{
+			"caddy-host":     "app.example.com",
+			"caddy-path":     "/api",
+			"caddy-protocol": "http",
+			"caddy-priority": "100",
+			"caddy-weight":   "5",
+		}
 		svc := &ServiceState{
 			Name: "web",
-			Meta: map[string]string{
-				"caddy-host":     "app.example.com",
-				"caddy-path":     "/api",
-				"caddy-protocol": "http",
-				"caddy-priority": "100",
-				"caddy-weight":   "5",
-			},
 			Instances: []ServiceInstance{
-				{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}},
-				{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 2, Tags: []string{"caddy-consul"}},
+				{Address: "10.0.0.1", Port: 8080, Healthy: true, Weight: 1, Tags: []string{"caddy-consul"}, Meta: meta},
+				{Address: "10.0.0.2", Port: 8080, Healthy: true, Weight: 2, Tags: []string{"caddy-consul"}, Meta: meta},
 			},
 		}
 		b.ResetTimer()
@@ -308,20 +309,20 @@ func BenchmarkParseServiceRoutes(b *testing.B) {
 	})
 
 	b.Run("indexed_multi_route", func(b *testing.B) {
+		meta := map[string]string{
+			"caddy-route-0-protocol": "http",
+			"caddy-route-0-host":     "web.example.com",
+			"caddy-route-0-path":     "/",
+			"caddy-route-1-protocol": "tcp",
+			"caddy-route-1-port":     "5432",
+			"caddy-route-2-protocol": "http",
+			"caddy-route-2-host":     "api.example.com",
+			"caddy-route-2-path":     "/v2",
+		}
 		svc := &ServiceState{
 			Name: "multi",
-			Meta: map[string]string{
-				"caddy-route-0-protocol": "http",
-				"caddy-route-0-host":     "web.example.com",
-				"caddy-route-0-path":     "/",
-				"caddy-route-1-protocol": "tcp",
-				"caddy-route-1-port":     "5432",
-				"caddy-route-2-protocol": "http",
-				"caddy-route-2-host":     "api.example.com",
-				"caddy-route-2-path":     "/v2",
-			},
 			Instances: []ServiceInstance{
-				{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}},
+				{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
 			},
 		}
 		b.ResetTimer()
