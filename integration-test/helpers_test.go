@@ -312,14 +312,15 @@ func getCaddyConfig() (map[string]interface{}, error) {
 
 // consulRouteEntry represents a route from the /consul/routes admin endpoint.
 type consulRouteEntry struct {
-	Host         string `json:"Host"`
-	Path         string `json:"Path"`
-	ServiceName  string `json:"ServiceName"`
-	StripPrefix  bool   `json:"StripPrefix"`
-	Via          string `json:"Via"`
-	RedirectCode int    `json:"RedirectCode"`
-	RedirectURL  string `json:"RedirectURL"`
-	Upstreams    []struct {
+	Host          string `json:"Host"`
+	Path          string `json:"Path"`
+	ServiceName   string `json:"ServiceName"`
+	StripPrefix   bool   `json:"StripPrefix"`
+	Via           string `json:"Via"`
+	RedirectCode  int    `json:"RedirectCode"`
+	RedirectURL   string `json:"RedirectURL"`
+	NoCacheOptOut bool   `json:"NoCacheOptOut"`
+	Upstreams     []struct {
 		Address string `json:"Address"`
 		Weight  int    `json:"Weight"`
 		Healthy bool   `json:"Healthy"`

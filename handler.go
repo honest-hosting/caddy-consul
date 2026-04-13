@@ -31,9 +31,10 @@ func init() {
 // based on Consul service discovery. It reads from an in-memory route table
 // shared with the consul app module — no admin API calls, no config reloads.
 type ConsulProxyHandler struct {
-	logger     *zap.Logger
-	routeTable *RouteTable
-	transport  *http.Transport
+	logger               *zap.Logger
+	routeTable           *RouteTable
+	transport            *http.Transport
+	globalNoCacheMatcher *StatusMatcher // from ConsulRouter global config; nil = no modification
 }
 
 // CaddyModule returns the Caddy module information.
@@ -62,6 +63,8 @@ func (h *ConsulProxyHandler) Provision(ctx caddy.Context) error {
 	if h.routeTable == nil {
 		return fmt.Errorf("consul_proxy: consul app route table not initialized")
 	}
+
+	h.globalNoCacheMatcher = consulApp.NoCacheMatcher()
 
 	h.transport = &http.Transport{
 		DialContext: (&net.Dialer{
@@ -95,6 +98,9 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		return nil
 	}
 
+	// Resolve effective no-cache matcher for this route
+	noCacheMatcher := h.effectiveNoCacheMatcher(route)
+
 	// Handle proxy routes
 	upstreams := healthyUpstreams(route.Upstreams)
 	if len(upstreams) == 0 {
@@ -106,6 +112,7 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		if route.Via != "" {
 			w.Header().Set("X-Caddy-Consul-Via", route.Via)
 		}
+		setNoCacheIfMatched(noCacheMatcher, http.StatusBadGateway, w.Header())
 		w.WriteHeader(http.StatusBadGateway)
 		return nil
 	}
@@ -121,12 +128,12 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	proxy.Transport = h.transport
-	if route.Via != "" {
-		via := route.Via
-		proxy.ModifyResponse = func(resp *http.Response) error {
-			resp.Header.Set("X-Caddy-Consul-Via", via)
-			return nil
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		if route.Via != "" {
+			resp.Header.Set("X-Caddy-Consul-Via", route.Via)
 		}
+		setNoCacheIfMatched(noCacheMatcher, resp.StatusCode, resp.Header)
+		return nil
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		h.logger.Error("proxy error",
@@ -137,6 +144,7 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		if route.Via != "" {
 			w.Header().Set("X-Caddy-Consul-Via", route.Via)
 		}
+		setNoCacheIfMatched(noCacheMatcher, http.StatusBadGateway, w.Header())
 		w.WriteHeader(http.StatusBadGateway)
 	}
 
@@ -200,6 +208,27 @@ func expandRedirectURL(template string, r *http.Request) string {
 	result = strings.ReplaceAll(result, "{http.request.uri}", r.RequestURI)
 	result = strings.ReplaceAll(result, "{http.request.host}", r.Host)
 	return result
+}
+
+// effectiveNoCacheMatcher returns the matcher to use for a given route.
+// Returns nil if no-cache headers should not be applied.
+// Precedence: per-service opt-out → per-service matcher → global matcher → nil (no-op).
+func (h *ConsulProxyHandler) effectiveNoCacheMatcher(route *CompiledHTTPRoute) *StatusMatcher {
+	if route.NoCacheOptOut {
+		return nil // service explicitly opted out
+	}
+	if route.NoCacheMatcher != nil {
+		return route.NoCacheMatcher // per-service override
+	}
+	return h.globalNoCacheMatcher // may be nil if global is unset (default)
+}
+
+// setNoCacheIfMatched sets Cache-Control: no-cache, no-store on the response
+// if the status code matches the configured set. No-op if matcher is nil.
+func setNoCacheIfMatched(matcher *StatusMatcher, statusCode int, header http.Header) {
+	if matcher != nil && matcher.Matches(statusCode) {
+		header.Set("Cache-Control", "no-cache, no-store")
+	}
 }
 
 // healthyUpstreams filters to only healthy upstreams.

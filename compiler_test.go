@@ -459,3 +459,88 @@ func TestFilterTCPRoutesByNode_PreservesAllUpstreams(t *testing.T) {
 	require.Len(t, filtered, 1)
 	assert.Len(t, filtered[0].Upstreams, 3)
 }
+
+// --- no-cache-status compiler tests ---
+
+func TestCompileHTTPRoutes_NoCacheStatus_PerService(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:      "svc-a",
+			Protocol:         ProtocolHTTP,
+			Host:             "a.example.com",
+			Enabled:          true,
+			HasNoCacheStatus: true,
+			NoCacheStatusRaw: "4xx,502",
+			Upstreams:        []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.NotNil(t, result.HTTPRoutes[0].NoCacheMatcher, "per-service matcher should be set")
+	assert.False(t, result.HTTPRoutes[0].NoCacheOptOut)
+	assert.True(t, result.HTTPRoutes[0].NoCacheMatcher.Matches(400))
+	assert.True(t, result.HTTPRoutes[0].NoCacheMatcher.Matches(502))
+	assert.False(t, result.HTTPRoutes[0].NoCacheMatcher.Matches(200))
+	assert.False(t, result.HTTPRoutes[0].NoCacheMatcher.Matches(503))
+}
+
+func TestCompileHTTPRoutes_NoCacheStatus_OptOut(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:      "svc-optout",
+			Protocol:         ProtocolHTTP,
+			Host:             "optout.example.com",
+			Enabled:          true,
+			HasNoCacheStatus: true,
+			NoCacheStatusRaw: "", // explicit opt-out
+			Upstreams:        []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Nil(t, result.HTTPRoutes[0].NoCacheMatcher)
+	assert.True(t, result.HTTPRoutes[0].NoCacheOptOut, "empty value should signal opt-out")
+}
+
+func TestCompileHTTPRoutes_NoCacheStatus_Absent(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:      "svc-default",
+			Protocol:         ProtocolHTTP,
+			Host:             "default.example.com",
+			Enabled:          true,
+			HasNoCacheStatus: false, // metadata key absent
+			Upstreams:        []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Nil(t, result.HTTPRoutes[0].NoCacheMatcher, "absent metadata should leave matcher nil")
+	assert.False(t, result.HTTPRoutes[0].NoCacheOptOut, "absent metadata should not opt out")
+}
+
+func TestCompileHTTPRoutes_NoCacheStatus_InvalidFallback(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:      "svc-invalid",
+			Protocol:         ProtocolHTTP,
+			Host:             "invalid.example.com",
+			Enabled:          true,
+			HasNoCacheStatus: true,
+			NoCacheStatusRaw: "bogus",
+			Upstreams:        []Upstream{{Address: "10.0.0.1:8080", Healthy: true}},
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.Nil(t, result.HTTPRoutes[0].NoCacheMatcher, "invalid spec should fall through to global (nil)")
+	assert.False(t, result.HTTPRoutes[0].NoCacheOptOut, "invalid spec should not opt out")
+}

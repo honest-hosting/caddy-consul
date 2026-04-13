@@ -57,6 +57,7 @@ xcaddy build \
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
 | `l4_mode` | Layer 4 routing mode: `global` or `node` | `global` |
 | `l4_node_hostname` | Explicit Consul node name override for `l4_mode=node` | _(auto-detected from agent)_ |
+| `no_cache_status` | Status codes that trigger `Cache-Control: no-cache, no-store` on responses. Accepts class wildcards (`3xx`, `4xx`, `5xx`) and individual codes (`502`, `503`). Case-insensitive. | _(empty, no modification)_ |
 
 Environment variables `CONSUL_HTTP_ADDR`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_SSL`, `CONSUL_CACERT`, `CONSUL_CLIENT_CERT`, and `CONSUL_CLIENT_KEY` are supported as fallbacks when the corresponding option is not set.
 
@@ -134,6 +135,12 @@ Minimal configuration:
         # Explicit node name override for l4_mode=node (default: auto-detected from Consul agent)
         # l4_node_hostname worker-03.dc1
 
+        # Set Cache-Control: no-cache, no-store on responses matching these status codes.
+        # Accepts class wildcards (3xx, 4xx, 5xx) and individual codes (502, 503).
+        # Default: empty (no modification — upstream Cache-Control headers pass through as-is).
+        # Per-service override via caddy-no-cache-status metadata.
+        no_cache_status 3xx,4xx,5xx
+
         # Enable metrics on admin API (optional)
         metrics /metrics/consul
     }
@@ -185,7 +192,8 @@ The JSON field names match the Caddyfile directive names. The consul config live
       "data_dir": "/var/lib/caddy-consul",
       "metrics": "/metrics/consul",
       "l4_mode": "global",
-      "l4_node_hostname": ""
+      "l4_node_hostname": "",
+      "no_cache_status": "3xx,4xx,5xx"
     },
     "http": {
       "servers": {
@@ -263,6 +271,7 @@ Services using Fabio-compatible `urlprefix-` tags do NOT need sentinel tags — 
 | `caddy-redirect-code` | HTTP redirect status code (301, 302, etc.) | _(empty = proxy)_ |
 | `caddy-redirect-url` | Redirect target URL (may use `{http.request.uri}`) | _(empty = proxy)_ |
 | `caddy-enabled` | Enable/disable route (`true`/`false`) | `true` |
+| `caddy-no-cache-status` | Per-service override for `no_cache_status`. Overrides the global setting entirely. Empty value (`""`) opts out of Cache-Control modification. | _(uses global setting)_ |
 
 #### Example: HTTP Redirect
 
@@ -281,6 +290,60 @@ Services using Fabio-compatible `urlprefix-` tags do NOT need sentinel tags — 
 ```
 
 Redirect routes return an HTTP redirect response instead of proxying. They work in both service and connect proxy modes. The `{http.request.uri}` placeholder preserves the original request path.
+
+#### Example: No-Cache Response Headers
+
+The `no_cache_status` option (global) and `caddy-no-cache-status` metadata (per-service) control automatic `Cache-Control: no-cache, no-store` injection on responses matching specific status codes. This prevents browsers and CDNs from caching error or redirect responses.
+
+**Global config** — applies to all services unless overridden:
+
+```caddyfile
+consul {
+    no_cache_status 3xx,4xx,5xx
+}
+```
+
+**Per-service override** — replaces the global setting for this service only:
+
+```json
+{
+    "service": {
+        "name": "my-api",
+        "port": 8080,
+        "tags": ["caddy-consul"],
+        "meta": {
+            "caddy-host": "api.example.com",
+            "caddy-no-cache-status": "502,503"
+        }
+    }
+}
+```
+
+**Per-service opt-out** — disables Cache-Control modification even when global is set:
+
+```json
+{
+    "service": {
+        "name": "my-cdn-app",
+        "port": 8080,
+        "tags": ["caddy-consul"],
+        "meta": {
+            "caddy-host": "cdn.example.com",
+            "caddy-no-cache-status": ""
+        }
+    }
+}
+```
+
+**Precedence:**
+1. Per-service metadata present with value → use that value
+2. Per-service metadata present but empty (`""`) → no modification (opt-out)
+3. Per-service metadata absent → use global `no_cache_status`
+4. Global unset → no modification (upstream Cache-Control passes through)
+
+**Accepted formats:** `3xx`, `3XX`, `301`, `4xx,502,503` (comma-separated, case-insensitive wildcards).
+
+For multi-route services, use the indexed variant: `caddy-route-N-no-cache-status`.
 
 #### Example: Consul Service Tags
 

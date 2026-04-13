@@ -77,16 +77,21 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 
 		claimed[key] = r
 
+		// Resolve per-service no-cache matcher
+		noCacheMatcher, noCacheOptOut := rc.resolveNoCacheMatcher(r)
+
 		// Redirect routes don't need upstreams
 		if r.IsRedirect() {
 			compiled = append(compiled, CompiledHTTPRoute{
-				Host:         r.Host,
-				Path:         r.Path,
-				StripPrefix:  r.StripPrefix,
-				ServiceName:  r.ServiceName,
-				Via:          r.Via,
-				RedirectCode: r.RedirectCode,
-				RedirectURL:  r.RedirectURL,
+				Host:           r.Host,
+				Path:           r.Path,
+				StripPrefix:    r.StripPrefix,
+				ServiceName:    r.ServiceName,
+				Via:            r.Via,
+				RedirectCode:   r.RedirectCode,
+				RedirectURL:    r.RedirectURL,
+				NoCacheMatcher: noCacheMatcher,
+				NoCacheOptOut:  noCacheOptOut,
 			})
 			continue
 		}
@@ -109,12 +114,14 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 		}
 
 		compiled = append(compiled, CompiledHTTPRoute{
-			Host:        r.Host,
-			Path:        r.Path,
-			Upstreams:   healthy,
-			StripPrefix: r.StripPrefix,
-			ServiceName: r.ServiceName,
-			Via:         r.Via,
+			Host:           r.Host,
+			Path:           r.Path,
+			Upstreams:      healthy,
+			StripPrefix:    r.StripPrefix,
+			ServiceName:    r.ServiceName,
+			Via:            r.Via,
+			NoCacheMatcher: noCacheMatcher,
+			NoCacheOptOut:  noCacheOptOut,
 		})
 	}
 
@@ -170,6 +177,31 @@ func (rc *RouteCompiler) compileTCPRoutes(routes []RouteDefinition) ([]CompiledT
 	}
 
 	return compiled, conflicts
+}
+
+// resolveNoCacheMatcher parses the per-service no-cache-status metadata.
+// Returns (matcher, optOut):
+//   - metadata absent: (nil, false) → handler falls through to global
+//   - metadata present but empty: (nil, true) → service opted out
+//   - metadata present with valid spec: (parsed matcher, false) → per-service override
+//   - metadata present with invalid spec: (nil, false) → log warning, fall through to global
+func (rc *RouteCompiler) resolveNoCacheMatcher(r *RouteDefinition) (*StatusMatcher, bool) {
+	if !r.HasNoCacheStatus {
+		return nil, false
+	}
+	if r.NoCacheStatusRaw == "" {
+		return nil, true // explicit opt-out
+	}
+	matcher, err := ParseStatusMatcher(r.NoCacheStatusRaw)
+	if err != nil {
+		rc.logger.Warn("invalid caddy-no-cache-status, falling back to global",
+			zap.String("service", r.ServiceName),
+			zap.String("value", r.NoCacheStatusRaw),
+			zap.Error(err),
+		)
+		return nil, false
+	}
+	return matcher, false
 }
 
 func httpRouteKey(host, path string) string {

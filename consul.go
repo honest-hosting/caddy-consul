@@ -69,6 +69,10 @@ type ConsulRouter struct {
 	L4Mode         string `json:"l4_mode,omitempty"`
 	L4NodeHostname string `json:"l4_node_hostname,omitempty"` // explicit override for node identity
 
+	// No-cache response header policy: comma-separated status codes/classes.
+	// Default: empty (no modification). Example: "3xx,4xx,5xx".
+	NoCacheStatus string `json:"no_cache_status,omitempty"`
+
 	// Internal (not serialized)
 	watcher             *ConsulWatcher       `json:"-"`
 	compiler            *RouteCompiler       `json:"-"`
@@ -80,11 +84,18 @@ type ConsulRouter struct {
 	registrar           *ServiceRegistrar    `json:"-"`
 	sidecarWarnOnce     *sync.Once           `json:"-"`
 	nodeName            string               `json:"-"` // resolved local node name for l4_mode=node
+	noCacheMatcher      *StatusMatcher       `json:"-"` // parsed global no-cache matcher (nil = no modification)
 }
 
 // RouteTable returns the shared route table for the consul_proxy handler.
 func (cr *ConsulRouter) RouteTable() *RouteTable {
 	return cr.routeTable
+}
+
+// NoCacheMatcher returns the parsed global no-cache status matcher.
+// Returns nil if no global no_cache_status is configured (default).
+func (cr *ConsulRouter) NoCacheMatcher() *StatusMatcher {
+	return cr.noCacheMatcher
 }
 
 // CaddyModule returns the Caddy module information.
@@ -103,6 +114,15 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 
 	if err := cr.validate(); err != nil {
 		return fmt.Errorf("caddy-consul: invalid configuration: %w", err)
+	}
+
+	// Parse global no-cache status matcher (nil if unset — default is no modification)
+	if cr.NoCacheStatus != "" {
+		matcher, err := ParseStatusMatcher(cr.NoCacheStatus)
+		if err != nil {
+			return fmt.Errorf("caddy-consul: invalid no_cache_status: %w", err)
+		}
+		cr.noCacheMatcher = matcher
 	}
 
 	adminAddr := cr.CaddyAdminAPI

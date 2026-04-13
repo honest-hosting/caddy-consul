@@ -253,3 +253,61 @@ func TestValidate_L4ModeInvalid(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "l4_mode must be 'global' or 'node'")
 }
+
+// --- no_cache_status config tests ---
+
+func TestUnmarshalCaddyfile_NoCacheStatus(t *testing.T) {
+	input := `consul {
+		no_cache_status 4xx,5xx
+	}`
+	cr := new(ConsulRouter)
+	d := caddyfile.NewTestDispenser(input)
+	err := cr.UnmarshalCaddyfile(d)
+	require.NoError(t, err)
+	assert.Equal(t, "4xx,5xx", cr.NoCacheStatus)
+}
+
+func TestUnmarshalCaddyfile_NoCacheStatus_Default(t *testing.T) {
+	input := `consul {
+	}`
+	cr := new(ConsulRouter)
+	d := caddyfile.NewTestDispenser(input)
+	err := cr.UnmarshalCaddyfile(d)
+	require.NoError(t, err)
+	assert.Equal(t, "", cr.NoCacheStatus, "default should be empty (no modification)")
+
+	// Verify applyDefaults does not set a default
+	cr.applyDefaults()
+	assert.Equal(t, "", cr.NoCacheStatus, "applyDefaults should not set a no_cache_status default")
+}
+
+func TestValidate_NoCacheStatus_Valid(t *testing.T) {
+	cr := &ConsulRouter{
+		HealthPolicy: "passing", ConflictPolicy: "reject",
+		DebounceDuration: "500ms", ConsulScheme: "http",
+		L4Mode: "global", NoCacheStatus: "3xx,4xx,502",
+	}
+	err := cr.validate()
+	assert.NoError(t, err)
+}
+
+func TestValidate_NoCacheStatus_Empty(t *testing.T) {
+	cr := &ConsulRouter{
+		HealthPolicy: "passing", ConflictPolicy: "reject",
+		DebounceDuration: "500ms", ConsulScheme: "http",
+		L4Mode: "global", NoCacheStatus: "",
+	}
+	err := cr.validate()
+	assert.NoError(t, err, "empty no_cache_status should be valid")
+}
+
+func TestValidate_NoCacheStatus_Invalid(t *testing.T) {
+	cr := &ConsulRouter{
+		HealthPolicy: "passing", ConflictPolicy: "reject",
+		DebounceDuration: "500ms", ConsulScheme: "http",
+		L4Mode: "global", NoCacheStatus: "abc",
+	}
+	err := cr.validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid no_cache_status")
+}

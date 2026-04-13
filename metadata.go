@@ -120,16 +120,18 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 	// Phase 2: Group identical routes so multiple instances serving the same
 	// route definition share upstreams (load balancing).
 	type routeSignature struct {
-		protocol     Protocol
-		host         string
-		path         string
-		port         int
-		priority     int
-		weight       int
-		stripPrefix  bool
-		enabled      bool
-		redirectCode int
-		redirectURL  string
+		protocol         Protocol
+		host             string
+		path             string
+		port             int
+		priority         int
+		weight           int
+		stripPrefix      bool
+		enabled          bool
+		redirectCode     int
+		redirectURL      string
+		noCacheStatusRaw string
+		hasNoCacheStatus bool
 	}
 	type groupedRoute struct {
 		route     RouteDefinition
@@ -140,16 +142,18 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 
 	for _, ir := range allRoutes {
 		sig := routeSignature{
-			protocol:     ir.route.Protocol,
-			host:         ir.route.Host,
-			path:         ir.route.Path,
-			port:         ir.route.Port,
-			priority:     ir.route.Priority,
-			weight:       ir.route.Weight,
-			stripPrefix:  ir.route.StripPrefix,
-			enabled:      ir.route.Enabled,
-			redirectCode: ir.route.RedirectCode,
-			redirectURL:  ir.route.RedirectURL,
+			protocol:         ir.route.Protocol,
+			host:             ir.route.Host,
+			path:             ir.route.Path,
+			port:             ir.route.Port,
+			priority:         ir.route.Priority,
+			weight:           ir.route.Weight,
+			stripPrefix:      ir.route.StripPrefix,
+			enabled:          ir.route.Enabled,
+			redirectCode:     ir.route.RedirectCode,
+			redirectURL:      ir.route.RedirectURL,
+			noCacheStatusRaw: ir.route.NoCacheStatusRaw,
+			hasNoCacheStatus: ir.route.HasNoCacheStatus,
 		}
 		if existing, ok := routeMap[sig]; ok {
 			existing.upstreams = append(existing.upstreams, ir.upstream)
@@ -264,6 +268,10 @@ func parseNonIndexedMeta(meta map[string]string) RouteDefinition {
 	if v, ok := meta["caddy-enabled"]; ok {
 		rd.Enabled = v != "false"
 	}
+	if v, ok := meta["caddy-no-cache-status"]; ok {
+		rd.NoCacheStatusRaw = v
+		rd.HasNoCacheStatus = true
+	}
 
 	return rd
 }
@@ -347,6 +355,10 @@ func parseIndexedMeta(meta map[string]string) []RouteDefinition {
 		}
 		if v, ok := fields["enabled"]; ok {
 			rd.Enabled = v != "false"
+		}
+		if v, ok := fields["no-cache-status"]; ok {
+			rd.NoCacheStatusRaw = v
+			rd.HasNoCacheStatus = true
 		}
 
 		routes = append(routes, rd)
