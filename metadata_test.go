@@ -895,3 +895,85 @@ func TestParseServiceRoutes_IdenticalRoutes_GroupedUpstreams(t *testing.T) {
 	assert.Len(t, routes[0].Upstreams, 2, "grouped route should have both upstreams")
 	assert.Equal(t, "grouped.example.com", routes[0].Host)
 }
+
+// --- caddy-no-cache-status metadata tests ---
+
+func TestParseNonIndexedMeta_NoCacheStatus(t *testing.T) {
+	meta := map[string]string{
+		"caddy-host":            "example.com",
+		"caddy-no-cache-status": "4xx,502",
+	}
+	rd := parseNonIndexedMeta(meta)
+	assert.True(t, rd.HasNoCacheStatus)
+	assert.Equal(t, "4xx,502", rd.NoCacheStatusRaw)
+}
+
+func TestParseNonIndexedMeta_NoCacheStatus_Empty(t *testing.T) {
+	meta := map[string]string{
+		"caddy-host":            "example.com",
+		"caddy-no-cache-status": "",
+	}
+	rd := parseNonIndexedMeta(meta)
+	assert.True(t, rd.HasNoCacheStatus, "key present with empty value should set HasNoCacheStatus")
+	assert.Equal(t, "", rd.NoCacheStatusRaw)
+}
+
+func TestParseNonIndexedMeta_NoCacheStatus_Absent(t *testing.T) {
+	meta := map[string]string{
+		"caddy-host": "example.com",
+	}
+	rd := parseNonIndexedMeta(meta)
+	assert.False(t, rd.HasNoCacheStatus)
+	assert.Equal(t, "", rd.NoCacheStatusRaw)
+}
+
+func TestParseIndexedMeta_NoCacheStatus(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-host":            "example.com",
+		"caddy-route-0-no-cache-status": "5xx",
+	}
+	routes := parseIndexedMeta(meta)
+	require.Len(t, routes, 1)
+	assert.True(t, routes[0].HasNoCacheStatus)
+	assert.Equal(t, "5xx", routes[0].NoCacheStatusRaw)
+}
+
+func TestParseIndexedMeta_NoCacheStatus_Empty(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-host":            "example.com",
+		"caddy-route-0-no-cache-status": "",
+	}
+	routes := parseIndexedMeta(meta)
+	require.Len(t, routes, 1)
+	assert.True(t, routes[0].HasNoCacheStatus)
+	assert.Equal(t, "", routes[0].NoCacheStatusRaw)
+}
+
+func TestParseServiceRoutes_NoCacheStatus_DifferentConfigs_NotGrouped(t *testing.T) {
+	// Two instances with different no-cache-status should NOT be grouped.
+	svc := &ServiceState{
+		Name: "nocache-diff",
+		Instances: []ServiceInstance{
+			{
+				ID: "inst-a", Address: "10.0.0.1", Port: 8080,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":            "nocache.example.com",
+					"caddy-no-cache-status": "5xx",
+				},
+			},
+			{
+				ID: "inst-b", Address: "10.0.0.2", Port: 8080,
+				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":            "nocache.example.com",
+					"caddy-no-cache-status": "4xx",
+				},
+			},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 2, "different no-cache-status configs should not be grouped")
+}
+

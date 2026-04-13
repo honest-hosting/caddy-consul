@@ -132,9 +132,11 @@ type RouteDefinition struct {
 	StripPrefix  bool
 	Enabled      bool
 	Upstreams    []Upstream
-	Via          string // routing tag value for X-Caddy-Consul-Via header
-	RedirectCode int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
-	RedirectURL  string // redirect target URL template (may contain {http.request.uri})
+	Via              string // routing tag value for X-Caddy-Consul-Via header
+	RedirectCode     int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
+	RedirectURL      string // redirect target URL template (may contain {http.request.uri})
+	NoCacheStatusRaw string // raw no-cache-status spec from metadata (empty = opt-out if HasNoCacheStatus)
+	HasNoCacheStatus bool   // true if caddy-no-cache-status key was present (distinguishes unset from empty)
 }
 
 // IsRedirect returns true if this route is an HTTP redirect (not a proxy).
@@ -165,9 +167,11 @@ type CompiledHTTPRoute struct {
 	Upstreams    []Upstream
 	StripPrefix  bool
 	ServiceName  string
-	Via          string // routing tag for X-Caddy-Consul-Via response header
-	RedirectCode int
-	RedirectURL  string
+	Via            string // routing tag for X-Caddy-Consul-Via response header
+	RedirectCode   int
+	RedirectURL    string
+	NoCacheMatcher *StatusMatcher `json:"-"` // per-service no-cache matcher; nil = use global
+	NoCacheOptOut  bool           // true = service explicitly opted out of no-cache headers
 }
 
 // CompiledTCPRoute is a Consul-managed TCP route ready for injection into Caddy config.

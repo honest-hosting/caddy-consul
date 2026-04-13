@@ -289,6 +289,12 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.L4NodeHostname = d.Val()
 
+		case "no_cache_status":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.NoCacheStatus = d.Val()
+
 		default:
 			return d.Errf("unrecognized consul option: %s", d.Val())
 		}
@@ -402,6 +408,12 @@ func (cr *ConsulRouter) validate() error {
 	if cr.ConsulTLSCert != "" || cr.ConsulTLSKey != "" {
 		if cr.ConsulTLSCert == "" || cr.ConsulTLSKey == "" {
 			return fmt.Errorf("both tls_cert and tls_key must be specified together")
+		}
+	}
+
+	if cr.NoCacheStatus != "" {
+		if _, err := ParseStatusMatcher(cr.NoCacheStatus); err != nil {
+			return fmt.Errorf("invalid no_cache_status '%s': %w", cr.NoCacheStatus, err)
 		}
 	}
 
