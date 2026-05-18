@@ -137,6 +137,64 @@ func TestBuildHTTPRouteJSON_Redirect(t *testing.T) {
 	assert.Equal(t, "https://new.example.com{http.request.uri}", location[0])
 }
 
+func TestBuildHTTPRouteJSON_RedirectNoCache(t *testing.T) {
+	route := CompiledHTTPRoute{
+		Host:            "old.example.com",
+		Path:            "/",
+		ServiceName:     "redirect-svc",
+		RedirectCode:    301,
+		RedirectURL:     "https://new.example.com{http.request.uri}",
+		RedirectNoCache: true,
+	}
+
+	data, err := BuildHTTPRouteJSON(route)
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &result))
+
+	handler := result["handle"].([]interface{})[0].(map[string]interface{})
+	headers := handler["headers"].(map[string]interface{})
+
+	cc := headers["Cache-Control"].([]interface{})
+	require.Len(t, cc, 1)
+	assert.Equal(t, "no-cache, no-store, must-revalidate", cc[0])
+
+	pragma := headers["Pragma"].([]interface{})
+	require.Len(t, pragma, 1)
+	assert.Equal(t, "no-cache", pragma[0])
+
+	expires := headers["Expires"].([]interface{})
+	require.Len(t, expires, 1)
+	assert.Equal(t, "0", expires[0])
+}
+
+func TestBuildHTTPRouteJSON_RedirectNoCache_DefaultOmitsHeaders(t *testing.T) {
+	route := CompiledHTTPRoute{
+		Host:         "old.example.com",
+		Path:         "/",
+		ServiceName:  "redirect-svc",
+		RedirectCode: 301,
+		RedirectURL:  "https://new.example.com{http.request.uri}",
+	}
+
+	data, err := BuildHTTPRouteJSON(route)
+	require.NoError(t, err)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &result))
+
+	handler := result["handle"].([]interface{})[0].(map[string]interface{})
+	headers := handler["headers"].(map[string]interface{})
+
+	_, hasCC := headers["Cache-Control"]
+	assert.False(t, hasCC)
+	_, hasPragma := headers["Pragma"]
+	assert.False(t, hasPragma)
+	_, hasExpires := headers["Expires"]
+	assert.False(t, hasExpires)
+}
+
 func TestBuildHTTPRouteJSON_RedirectNoUpstreams(t *testing.T) {
 	// Redirect routes should work even with zero upstreams
 	route := CompiledHTTPRoute{

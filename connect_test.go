@@ -178,4 +178,3 @@ func TestSidecarResolver_ResolveUpstreams_ZeroBindPort(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "has no bind port")
 }
-

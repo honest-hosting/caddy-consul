@@ -27,7 +27,7 @@ type persistedServiceState struct {
 // This prevents the watcher from re-querying Consul on reload, avoiding 429s.
 type persistedState struct {
 	// Catalog state
-	CatalogIndex uint64                           `json:"catalog_index"`
+	CatalogIndex uint64                            `json:"catalog_index"`
 	Services     map[string]*persistedServiceState `json:"services,omitempty"`
 
 	// Health state watcher

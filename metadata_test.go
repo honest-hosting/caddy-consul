@@ -437,6 +437,62 @@ func TestParseServiceRoutes_IndexedRedirect(t *testing.T) {
 	assert.Equal(t, "app.example.com", routes[1].Host)
 }
 
+func TestParseServiceRoutes_RedirectNoCache_NonIndexed(t *testing.T) {
+	svc := &ServiceState{
+		Name: "redirect-nc",
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":              "old.example.com",
+					"caddy-redirect-code":     "301",
+					"caddy-redirect-url":      "https://new.example.com{http.request.uri}",
+					"caddy-redirect-no-cache": "true",
+				}},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 1)
+	assert.True(t, routes[0].RedirectNoCache)
+}
+
+func TestParseServiceRoutes_RedirectNoCache_Indexed(t *testing.T) {
+	meta := map[string]string{
+		"caddy-route-0-host":              "old.example.com",
+		"caddy-route-0-redirect-code":     "301",
+		"caddy-route-0-redirect-url":      "https://new.example.com{http.request.uri}",
+		"caddy-route-0-redirect-no-cache": "true",
+	}
+	svc := &ServiceState{
+		Name: "redirect-nc-idx",
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"}, Meta: meta},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 1)
+	assert.True(t, routes[0].RedirectNoCache)
+}
+
+func TestParseServiceRoutes_RedirectNoCache_DefaultFalse(t *testing.T) {
+	svc := &ServiceState{
+		Name: "redirect-default",
+		Instances: []ServiceInstance{
+			{Address: "10.0.0.1", Port: 8080, Healthy: true, Tags: []string{"caddy-consul"},
+				Meta: map[string]string{
+					"caddy-host":          "old.example.com",
+					"caddy-redirect-code": "301",
+					"caddy-redirect-url":  "https://new.example.com{http.request.uri}",
+				}},
+		},
+	}
+
+	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
+	require.Len(t, routes, 1)
+	assert.False(t, routes[0].RedirectNoCache)
+}
+
 func TestParseServiceRoutes_NoRoutingMetadata(t *testing.T) {
 	svc := &ServiceState{
 		Name: "plain",
@@ -684,8 +740,8 @@ func TestParseServiceRoutes_MixedInstanceMeta_DifferentRoutes(t *testing.T) {
 				ID: "filemanager-frontend", Address: "10.0.0.1", Port: 26662,
 				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
 				Meta: map[string]string{
-					"caddy-host":     "filemanager.example.com:8443",
-					"caddy-protocol": "http",
+					"caddy-host":      "filemanager.example.com:8443",
+					"caddy-protocol":  "http",
 					"external-source": "nomad",
 				},
 			},
@@ -693,8 +749,8 @@ func TestParseServiceRoutes_MixedInstanceMeta_DifferentRoutes(t *testing.T) {
 				ID: "filemanager-sftp", Address: "10.0.0.1", Port: 29117,
 				Healthy: true, Weight: 1, Tags: []string{"caddy-consul"},
 				Meta: map[string]string{
-					"caddy-port":     "40000",
-					"caddy-protocol": "tcp",
+					"caddy-port":      "40000",
+					"caddy-protocol":  "tcp",
 					"external-source": "nomad",
 				},
 			},
@@ -976,4 +1032,3 @@ func TestParseServiceRoutes_NoCacheStatus_DifferentConfigs_NotGrouped(t *testing
 	routes := ParseServiceRoutes(svc, "caddy-consul", "caddy-consul-connect", testLogger())
 	require.Len(t, routes, 2, "different no-cache-status configs should not be grouped")
 }
-

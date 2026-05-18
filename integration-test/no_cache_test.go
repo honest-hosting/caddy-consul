@@ -12,7 +12,8 @@ import (
 // --- Cache-Control no-cache response header tests ---
 //
 // These tests verify the no_cache_status feature which sets
-// Cache-Control: no-cache, no-store on responses matching configured status codes.
+// Cache-Control: no-cache, no-store, must-revalidate (plus Pragma: no-cache and
+// Expires: 0) on responses matching configured status codes.
 //
 // NOTE: The integration test Caddyfile must set no_cache_status in the consul block
 // for global-default tests to work. When the global is unset, no modification occurs.
@@ -147,10 +148,14 @@ func TestIntegration_NoCache_UpstreamCacheControl_Preserved(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	// Echo server may or may not set Cache-Control, but at minimum the plugin
-	// should not inject "no-cache, no-store" on a 200.
+	// should not inject no-cache headers on a 200.
 	cc := resp.Header.Get("Cache-Control")
 	if cc != "" {
-		assert.NotEqual(t, "no-cache, no-store", cc,
+		assert.NotEqual(t, "no-cache, no-store, must-revalidate", cc,
 			"plugin should not overwrite upstream Cache-Control on 200")
 	}
+	assert.Empty(t, resp.Header.Get("Pragma"),
+		"plugin should not inject Pragma on 200")
+	assert.Empty(t, resp.Header.Get("Expires"),
+		"plugin should not inject Expires on 200")
 }

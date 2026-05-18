@@ -83,15 +83,16 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 		// Redirect routes don't need upstreams
 		if r.IsRedirect() {
 			compiled = append(compiled, CompiledHTTPRoute{
-				Host:           r.Host,
-				Path:           r.Path,
-				StripPrefix:    r.StripPrefix,
-				ServiceName:    r.ServiceName,
-				Via:            r.Via,
-				RedirectCode:   r.RedirectCode,
-				RedirectURL:    r.RedirectURL,
-				NoCacheMatcher: noCacheMatcher,
-				NoCacheOptOut:  noCacheOptOut,
+				Host:            r.Host,
+				Path:            r.Path,
+				StripPrefix:     r.StripPrefix,
+				ServiceName:     r.ServiceName,
+				Via:             r.Via,
+				RedirectCode:    r.RedirectCode,
+				RedirectURL:     r.RedirectURL,
+				RedirectNoCache: r.RedirectNoCache,
+				NoCacheMatcher:  noCacheMatcher,
+				NoCacheOptOut:   noCacheOptOut,
 			})
 			continue
 		}

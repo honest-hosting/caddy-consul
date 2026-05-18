@@ -8,6 +8,7 @@ help: ## Display this help screen (default)
 .PHONY: help
 
 all: clean build test test-bench test-stress test-integration ## Run all steps: clean, build, test, test-bench, test-stress, test-integration
+	@echo "Test Failures: "
 	@grep -ci 'FAIL:' /tmp/caddy-consul-* || true
 .PHONY: all
 
@@ -16,10 +17,10 @@ lint: ## Run linter against codebase
 .PHONY: lint
 
 # GO_VERSION should (generally) match go.mod version (CADDY_VERSION must also match in go.mod)
-build: export GO_VERSION               ?= 1.25.6
-build: export XCADDY_VERSION           ?= 0.4.5
-build: export CADDY_VERSION            ?= 2.11.2
-build: export CADDY_L4_VERSION         ?= afd229714fb14a387f0736cab048afeb72b8946a
+build: export GO_VERSION       ?= 1.25.6
+build: export XCADDY_VERSION   ?= 0.4.5
+build: export CADDY_VERSION    ?= 2.11.2
+build: export CADDY_L4_VERSION ?= afd229714fb14a387f0736cab048afeb72b8946a
 build: lint ## Run 'docker composer build' to build caddy with plugin, copy output binary to ./bin/caddy
 	@docker compose build --build-arg GO_VERSION=$(GO_VERSION) --build-arg XCADDY_VERSION=$(XCADDY_VERSION) --build-arg CADDY_VERSION=$(CADDY_VERSION) --build-arg CADDY_L4_VERSION=$(CADDY_L4_VERSION)
 	@CID=$$(docker create caddy-consul-integration-test:latest);          \

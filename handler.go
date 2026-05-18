@@ -94,6 +94,9 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 	if route.RedirectCode > 0 && route.RedirectURL != "" {
 		location := expandRedirectURL(route.RedirectURL, r)
 		w.Header().Set("Location", location)
+		if route.RedirectNoCache {
+			setNoCacheHeaders(w.Header())
+		}
 		w.WriteHeader(route.RedirectCode)
 		return nil
 	}
@@ -223,12 +226,20 @@ func (h *ConsulProxyHandler) effectiveNoCacheMatcher(route *CompiledHTTPRoute) *
 	return h.globalNoCacheMatcher // may be nil if global is unset (default)
 }
 
-// setNoCacheIfMatched sets Cache-Control: no-cache, no-store on the response
+// setNoCacheIfMatched sets no-cache headers on the response
 // if the status code matches the configured set. No-op if matcher is nil.
 func setNoCacheIfMatched(matcher *StatusMatcher, statusCode int, header http.Header) {
 	if matcher != nil && matcher.Matches(statusCode) {
-		header.Set("Cache-Control", "no-cache, no-store")
+		setNoCacheHeaders(header)
 	}
+}
+
+// setNoCacheHeaders sets the full set of no-cache headers used by both the
+// status-matched proxy path and the redirect-no-cache path.
+func setNoCacheHeaders(header http.Header) {
+	header.Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	header.Set("Pragma", "no-cache")
+	header.Set("Expires", "0")
 }
 
 // healthyUpstreams filters to only healthy upstreams.

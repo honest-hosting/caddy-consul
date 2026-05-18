@@ -284,6 +284,26 @@ func TestCompile_RedirectRoute_NoUpstreamsNeeded(t *testing.T) {
 	assert.Empty(t, result.HTTPRoutes[0].Upstreams)
 }
 
+func TestCompile_RedirectNoCache_Propagates(t *testing.T) {
+	rc := NewRouteCompiler(testLogger())
+	routes := []RouteDefinition{
+		{
+			ServiceName:     "redirect-svc",
+			Protocol:        ProtocolHTTP,
+			Host:            "old.example.com",
+			Path:            "/",
+			RedirectCode:    301,
+			RedirectURL:     "https://new.example.com{http.request.uri}",
+			RedirectNoCache: true,
+			Enabled:         true,
+		},
+	}
+
+	result := rc.Compile(routes)
+	require.Len(t, result.HTTPRoutes, 1)
+	assert.True(t, result.HTTPRoutes[0].RedirectNoCache)
+}
+
 func TestCompile_RedirectAndProxy_Coexist(t *testing.T) {
 	rc := NewRouteCompiler(testLogger())
 	routes := []RouteDefinition{

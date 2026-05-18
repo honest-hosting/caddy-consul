@@ -31,12 +31,12 @@ func BuildTCPRouteJSON(route CompiledTCPRoute) (json.RawMessage, error) {
 	var handler map[string]interface{}
 	if route.Passthrough {
 		handler = map[string]interface{}{
-			"handler":  "proxy",
+			"handler":   "proxy",
 			"upstreams": upstreams,
 		}
 	} else {
 		handler = map[string]interface{}{
-			"handler":  "proxy",
+			"handler":   "proxy",
 			"upstreams": upstreams,
 		}
 	}

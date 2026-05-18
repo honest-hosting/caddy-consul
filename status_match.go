@@ -9,7 +9,7 @@ import (
 // StatusMatcher efficiently matches HTTP status codes against a configured set
 // of individual codes and class wildcards (e.g., "3xx", "502", "503").
 type StatusMatcher struct {
-	classes [6]bool    // index 1-5 → 1xx-5xx class wildcards
+	classes [6]bool      // index 1-5 → 1xx-5xx class wildcards
 	codes   map[int]bool // individual codes
 }
 

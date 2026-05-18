@@ -28,10 +28,10 @@ type ConsulRouter struct {
 	ConsulDC     string `json:"datacenter,omitempty"`
 
 	// TLS to Consul
-	ConsulTLSCA             string `json:"tls_ca,omitempty"`
-	ConsulTLSCert           string `json:"tls_cert,omitempty"`
-	ConsulTLSKey            string `json:"tls_key,omitempty"`
-	ConsulTLSSkipVerify     bool   `json:"insecure_skip_verify,omitempty"`
+	ConsulTLSCA         string `json:"tls_ca,omitempty"`
+	ConsulTLSCert       string `json:"tls_cert,omitempty"`
+	ConsulTLSKey        string `json:"tls_key,omitempty"`
+	ConsulTLSSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
 
 	// Behavior
 	ServiceProxyEnable *bool  `json:"service_proxy_enable,omitempty"`
@@ -74,17 +74,17 @@ type ConsulRouter struct {
 	NoCacheStatus string `json:"no_cache_status,omitempty"`
 
 	// Internal (not serialized)
-	watcher             *ConsulWatcher       `json:"-"`
-	compiler            *RouteCompiler       `json:"-"`
-	reconciler          *Reconciler          `json:"-"`
-	routeTable          *RouteTable          `json:"-"`
-	stateMgr            *stateManager        `json:"-"`
-	sidecarResolver     *SidecarResolver     `json:"-"`
-	upstreamMgr         *UpstreamManager     `json:"-"`
-	registrar           *ServiceRegistrar    `json:"-"`
-	sidecarWarnOnce     *sync.Once           `json:"-"`
-	nodeName            string               `json:"-"` // resolved local node name for l4_mode=node
-	noCacheMatcher      *StatusMatcher       `json:"-"` // parsed global no-cache matcher (nil = no modification)
+	watcher         *ConsulWatcher    `json:"-"`
+	compiler        *RouteCompiler    `json:"-"`
+	reconciler      *Reconciler       `json:"-"`
+	routeTable      *RouteTable       `json:"-"`
+	stateMgr        *stateManager     `json:"-"`
+	sidecarResolver *SidecarResolver  `json:"-"`
+	upstreamMgr     *UpstreamManager  `json:"-"`
+	registrar       *ServiceRegistrar `json:"-"`
+	sidecarWarnOnce *sync.Once        `json:"-"`
+	nodeName        string            `json:"-"` // resolved local node name for l4_mode=node
+	noCacheMatcher  *StatusMatcher    `json:"-"` // parsed global no-cache matcher (nil = no modification)
 }
 
 // RouteTable returns the shared route table for the consul_proxy handler.
