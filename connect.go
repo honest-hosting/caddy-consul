@@ -73,4 +73,3 @@ func (sr *SidecarResolver) ResolveUpstreams(route *RouteDefinition) error {
 	return fmt.Errorf("no upstream entry for service %s in sidecar proxy %s (the sidecar's upstream list does not include this service)",
 		route.ServiceName, proxyServiceID)
 }
-

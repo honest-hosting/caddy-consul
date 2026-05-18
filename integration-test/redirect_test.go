@@ -113,6 +113,77 @@ func TestIntegration_Redirect_CoexistsWithProxy(t *testing.T) {
 	assert.True(t, ok, "proxy route should have reverse_proxy handler")
 }
 
+// --- Redirect with no-cache headers ---
+
+func TestIntegration_Redirect_NoCacheHeader(t *testing.T) {
+	client, err := newConsulClient()
+	require.NoError(t, err)
+
+	err = registerService(client, "redir-nocache", "echo-connect", 8080,
+		[]string{"caddy-consul"},
+		map[string]string{
+			"caddy-host":              "redir-nocache.localdev",
+			"caddy-redirect-code":     "301",
+			"caddy-redirect-url":      "https://target.localdev{http.request.uri}",
+			"caddy-redirect-no-cache": "true",
+		},
+	)
+	require.NoError(t, err)
+	defer func() {
+		_ = deregisterService(client, "redir-nocache")
+		_ = waitForHTTPRouteGone("redir-nocache.localdev", 10*time.Second)
+	}()
+
+	_, err = waitForHTTPRoute("redir-nocache.localdev", 15*time.Second)
+	require.NoError(t, err, "redirect route should be injected")
+
+	// Verify the route table exposes RedirectNoCache=true
+	routes, routeErr := getConsulRoutes()
+	require.NoError(t, routeErr)
+	var found bool
+	for _, r := range routes {
+		if r.Host == "redir-nocache.localdev" {
+			assert.True(t, r.RedirectNoCache, "route table should expose RedirectNoCache=true")
+			assert.Equal(t, 301, r.RedirectCode)
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "redirect route should appear in consul route table")
+}
+
+func TestIntegration_Redirect_NoCacheDefaultFalse(t *testing.T) {
+	client, err := newConsulClient()
+	require.NoError(t, err)
+
+	err = registerService(client, "redir-cacheable", "echo-connect", 8080,
+		[]string{"caddy-consul"},
+		map[string]string{
+			"caddy-host":          "redir-cacheable.localdev",
+			"caddy-redirect-code": "301",
+			"caddy-redirect-url":  "https://target.localdev{http.request.uri}",
+		},
+	)
+	require.NoError(t, err)
+	defer func() {
+		_ = deregisterService(client, "redir-cacheable")
+		_ = waitForHTTPRouteGone("redir-cacheable.localdev", 10*time.Second)
+	}()
+
+	_, err = waitForHTTPRoute("redir-cacheable.localdev", 15*time.Second)
+	require.NoError(t, err)
+
+	routes, routeErr := getConsulRoutes()
+	require.NoError(t, routeErr)
+	for _, r := range routes {
+		if r.Host == "redir-cacheable.localdev" {
+			assert.False(t, r.RedirectNoCache, "default should be false when caddy-redirect-no-cache is unset")
+			return
+		}
+	}
+	t.Fatal("redirect route not found in consul route table")
+}
+
 // --- Redirect with connect proxy enabled (no sidecar resolution needed) ---
 
 func TestIntegration_Redirect_WithConnectProxy(t *testing.T) {

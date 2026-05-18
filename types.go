@@ -121,20 +121,21 @@ type ServiceChange struct {
 
 // RouteDefinition holds parsed routing instructions from Consul metadata/tags.
 type RouteDefinition struct {
-	ServiceName  string
-	Protocol     Protocol
-	Host         string
-	Path         string
-	Port         int
-	UpstreamMode UpstreamMode
-	Priority     int
-	Weight       int
-	StripPrefix  bool
-	Enabled      bool
-	Upstreams    []Upstream
+	ServiceName      string
+	Protocol         Protocol
+	Host             string
+	Path             string
+	Port             int
+	UpstreamMode     UpstreamMode
+	Priority         int
+	Weight           int
+	StripPrefix      bool
+	Enabled          bool
+	Upstreams        []Upstream
 	Via              string // routing tag value for X-Caddy-Consul-Via header
 	RedirectCode     int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
 	RedirectURL      string // redirect target URL template (may contain {http.request.uri})
+	RedirectNoCache  bool   // if true, send no-cache headers on redirect responses
 	NoCacheStatusRaw string // raw no-cache-status spec from metadata (empty = opt-out if HasNoCacheStatus)
 	HasNoCacheStatus bool   // true if caddy-no-cache-status key was present (distinguishes unset from empty)
 }
@@ -162,16 +163,17 @@ type Conflict struct {
 
 // CompiledHTTPRoute is a Consul-managed HTTP route ready for injection into Caddy config.
 type CompiledHTTPRoute struct {
-	Host         string
-	Path         string
-	Upstreams    []Upstream
-	StripPrefix  bool
-	ServiceName  string
-	Via            string // routing tag for X-Caddy-Consul-Via response header
-	RedirectCode   int
-	RedirectURL    string
-	NoCacheMatcher *StatusMatcher `json:"-"` // per-service no-cache matcher; nil = use global
-	NoCacheOptOut  bool           // true = service explicitly opted out of no-cache headers
+	Host            string
+	Path            string
+	Upstreams       []Upstream
+	StripPrefix     bool
+	ServiceName     string
+	Via             string // routing tag for X-Caddy-Consul-Via response header
+	RedirectCode    int
+	RedirectURL     string
+	RedirectNoCache bool           // if true, send no-cache headers on redirect responses
+	NoCacheMatcher  *StatusMatcher `json:"-"` // per-service no-cache matcher; nil = use global
+	NoCacheOptOut   bool           // true = service explicitly opted out of no-cache headers
 }
 
 // CompiledTCPRoute is a Consul-managed TCP route ready for injection into Caddy config.

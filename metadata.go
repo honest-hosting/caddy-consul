@@ -130,6 +130,7 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 		enabled          bool
 		redirectCode     int
 		redirectURL      string
+		redirectNoCache  bool
 		noCacheStatusRaw string
 		hasNoCacheStatus bool
 	}
@@ -152,6 +153,7 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 			enabled:          ir.route.Enabled,
 			redirectCode:     ir.route.RedirectCode,
 			redirectURL:      ir.route.RedirectURL,
+			redirectNoCache:  ir.route.RedirectNoCache,
 			noCacheStatusRaw: ir.route.NoCacheStatusRaw,
 			hasNoCacheStatus: ir.route.HasNoCacheStatus,
 		}
@@ -265,6 +267,9 @@ func parseNonIndexedMeta(meta map[string]string) RouteDefinition {
 	if v, ok := meta["caddy-redirect-url"]; ok {
 		rd.RedirectURL = v
 	}
+	if v, ok := meta["caddy-redirect-no-cache"]; ok {
+		rd.RedirectNoCache = v == "true"
+	}
 	if v, ok := meta["caddy-enabled"]; ok {
 		rd.Enabled = v != "false"
 	}
@@ -352,6 +357,9 @@ func parseIndexedMeta(meta map[string]string) []RouteDefinition {
 		}
 		if v, ok := fields["redirect-url"]; ok {
 			rd.RedirectURL = v
+		}
+		if v, ok := fields["redirect-no-cache"]; ok {
+			rd.RedirectNoCache = v == "true"
 		}
 		if v, ok := fields["enabled"]; ok {
 			rd.Enabled = v != "false"

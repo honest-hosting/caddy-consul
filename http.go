@@ -21,12 +21,18 @@ func BuildHTTPRouteJSON(route CompiledHTTPRoute) (json.RawMessage, error) {
 
 	if route.RedirectCode > 0 && route.RedirectURL != "" {
 		// Redirect route: static_response with Location header
+		headers := map[string]interface{}{
+			"Location": []string{route.RedirectURL},
+		}
+		if route.RedirectNoCache {
+			headers["Cache-Control"] = []string{"no-cache, no-store, must-revalidate"}
+			headers["Pragma"] = []string{"no-cache"}
+			headers["Expires"] = []string{"0"}
+		}
 		handlers = append(handlers, map[string]interface{}{
 			"handler":     "static_response",
 			"status_code": fmt.Sprintf("%d", route.RedirectCode),
-			"headers": map[string]interface{}{
-				"Location": []string{route.RedirectURL},
-			},
+			"headers":     headers,
 		})
 	} else {
 		// Proxy route: reverse_proxy with upstreams

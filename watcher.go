@@ -16,24 +16,24 @@ import (
 // This architecture uses 2 connections regardless of service count, scaling
 // to 10,000+ services without overwhelming the Consul agent.
 type ConsulWatcher struct {
-	client       *consul.Client
-	logger       *zap.Logger
-	services     map[string]*ServiceState
-	mu           sync.RWMutex
-	onChange     func([]ServiceChange, map[string]*ServiceState)
-	stopCh       chan struct{}
-	healthPolicy HealthPolicy
-	debounce     time.Duration
-	pollInterval time.Duration
+	client           *consul.Client
+	logger           *zap.Logger
+	services         map[string]*ServiceState
+	mu               sync.RWMutex
+	onChange         func([]ServiceChange, map[string]*ServiceState)
+	stopCh           chan struct{}
+	healthPolicy     HealthPolicy
+	debounce         time.Duration
+	pollInterval     time.Duration
 	fullSyncInterval time.Duration
-	serviceTag   string
-	connectTag   string
+	serviceTag       string
+	connectTag       string
 
 	// Debounce state
-	debounceMu    sync.Mutex
-	debounceTimer *time.Timer
+	debounceMu     sync.Mutex
+	debounceTimer  *time.Timer
 	pendingChanges []ServiceChange
-	inDebounce    bool
+	inDebounce     bool
 
 	// Blocking query indexes
 	catalogIndex     uint64
@@ -65,7 +65,7 @@ func NewConsulWatcher(
 		client:            client,
 		logger:            logger,
 		services:          make(map[string]*ServiceState),
-		onChange:           onChange,
+		onChange:          onChange,
 		stopCh:            make(chan struct{}),
 		healthPolicy:      healthPolicy,
 		debounce:          debounce,

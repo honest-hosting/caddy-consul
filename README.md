@@ -15,6 +15,14 @@ Dynamic Caddy routing from Consul service registrations. Replaces Fabio as a sin
 - **Zero-Restart**: All routing changes apply dynamically via Caddy Admin API
 - **Conflict Detection**: Static config wins over Consul routes; first-seen wins among duplicates
 
+## Architecture
+
+The diagram below shows a simple ingress + web VM setup. Caddy runs on the ingress node, watching Consul for services. It routes HTTP traffic based on host/path and TCP traffic based on port/SNI. For Connect services, it manages Envoy sidecars for mTLS and intention enforcement.
+
+Note that this same architecture can be deployed with Nomad, where Caddy Consul runs as a `Service` job on each Nomad node, handling HTTP/TLS termination and routing for all services on that node.
+
+![caddy consul architecture](img/architecture.png)
+
 ## Installation
 
 ### Building with xcaddy
@@ -57,7 +65,7 @@ xcaddy build \
 | `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
 | `l4_mode` | Layer 4 routing mode: `global` or `node` | `global` |
 | `l4_node_hostname` | Explicit Consul node name override for `l4_mode=node` | _(auto-detected from agent)_ |
-| `no_cache_status` | Status codes that trigger `Cache-Control: no-cache, no-store` on responses. Accepts class wildcards (`3xx`, `4xx`, `5xx`) and individual codes (`502`, `503`). Case-insensitive. | _(empty, no modification)_ |
+| `no_cache_status` | Status codes that trigger no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, `Expires: 0`) on responses. Accepts class wildcards (`3xx`, `4xx`, `5xx`) and individual codes (`502`, `503`). Case-insensitive. | _(empty, no modification)_ |
 
 Environment variables `CONSUL_HTTP_ADDR`, `CONSUL_HTTP_TOKEN`, `CONSUL_HTTP_SSL`, `CONSUL_CACERT`, `CONSUL_CLIENT_CERT`, and `CONSUL_CLIENT_KEY` are supported as fallbacks when the corresponding option is not set.
 
@@ -135,7 +143,8 @@ Minimal configuration:
         # Explicit node name override for l4_mode=node (default: auto-detected from Consul agent)
         # l4_node_hostname worker-03.dc1
 
-        # Set Cache-Control: no-cache, no-store on responses matching these status codes.
+        # Set no-cache headers (Cache-Control: no-cache, no-store, must-revalidate;
+        # Pragma: no-cache; Expires: 0) on responses matching these status codes.
         # Accepts class wildcards (3xx, 4xx, 5xx) and individual codes (502, 503).
         # Default: empty (no modification — upstream Cache-Control headers pass through as-is).
         # Per-service override via caddy-no-cache-status metadata.
@@ -270,8 +279,9 @@ Services using Fabio-compatible `urlprefix-` tags do NOT need sentinel tags — 
 | `caddy-strip-prefix` | Strip path prefix before forwarding (`true`/`false`) | `false` |
 | `caddy-redirect-code` | HTTP redirect status code (301, 302, etc.) | _(empty = proxy)_ |
 | `caddy-redirect-url` | Redirect target URL (may use `{http.request.uri}`) | _(empty = proxy)_ |
+| `caddy-redirect-no-cache` | If `true`, send no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, `Expires: 0`) on redirect responses. Applies only to redirect routes. | `false` |
 | `caddy-enabled` | Enable/disable route (`true`/`false`) | `true` |
-| `caddy-no-cache-status` | Per-service override for `no_cache_status`. Overrides the global setting entirely. Empty value (`""`) opts out of Cache-Control modification. | _(uses global setting)_ |
+| `caddy-no-cache-status` | Per-service override for `no_cache_status`. Overrides the global setting entirely. Empty value (`""`) opts out of no-cache header modification. | _(uses global setting)_ |
 
 #### Example: HTTP Redirect
 
@@ -291,9 +301,28 @@ Services using Fabio-compatible `urlprefix-` tags do NOT need sentinel tags — 
 
 Redirect routes return an HTTP redirect response instead of proxying. They work in both service and connect proxy modes. The `{http.request.uri}` placeholder preserves the original request path.
 
+To prevent browsers and CDNs from caching a redirect (useful for redirects that may change), add `caddy-redirect-no-cache: "true"`. This sends `Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, and `Expires: 0` alongside the `Location` header:
+
+```json
+{
+    "service": {
+        "name": "rotating-redirect",
+        "port": 8080,
+        "meta": {
+            "caddy-host": "promo.example.com",
+            "caddy-redirect-code": "302",
+            "caddy-redirect-url": "https://promo-target.example.com{http.request.uri}",
+            "caddy-redirect-no-cache": "true"
+        }
+    }
+}
+```
+
+This setting only applies to redirect routes; for non-redirect responses, use `caddy-no-cache-status` instead. For multi-route services, use the indexed variant: `caddy-route-N-redirect-no-cache`.
+
 #### Example: No-Cache Response Headers
 
-The `no_cache_status` option (global) and `caddy-no-cache-status` metadata (per-service) control automatic `Cache-Control: no-cache, no-store` injection on responses matching specific status codes. This prevents browsers and CDNs from caching error or redirect responses.
+The `no_cache_status` option (global) and `caddy-no-cache-status` metadata (per-service) control automatic injection of no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, `Expires: 0`) on responses matching specific status codes. This prevents browsers and CDNs from caching error responses. (For redirect responses specifically, use `caddy-redirect-no-cache` — `caddy-no-cache-status` does not apply to redirect routes.)
 
 **Global config** — applies to all services unless overridden:
 
@@ -319,7 +348,7 @@ consul {
 }
 ```
 
-**Per-service opt-out** — disables Cache-Control modification even when global is set:
+**Per-service opt-out** — disables no-cache header modification even when global is set:
 
 ```json
 {
