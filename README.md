@@ -8,11 +8,11 @@ Dynamic Caddy routing from Consul service registrations. Replaces Fabio as a sin
 
 - **Dynamic Discovery**: Watches Consul catalog and health APIs via blocking queries (not polling)
 - **HTTP Routing**: Host-based, path-based, wildcard hosts, weighted upstreams, strip-prefix
-- **TCP/TLS Routing**: Port-based, SNI-based, TLS passthrough via caddy-l4
+- **TCP/TLS Routing**: Port-based, SNI-based, TLS passthrough — self-managed in-process listeners (no caddy-l4)
 - **Health-Aware**: Only routes to healthy upstreams (configurable policy)
 - **Consul Connect**: Sidecar proxy integration via Agent API (sidecar mode only)
 - **Fabio Compatible**: Supports `urlprefix-` tags for gradual migration
-- **Zero-Restart**: All routing changes apply dynamically via Caddy Admin API
+- **Zero-Reload**: HTTP *and* TCP routing changes apply fully in-memory — Consul churn never triggers a Caddy config reload, so ACME issuance/renewal is never interrupted
 - **Conflict Detection**: Static config wins over Consul routes; first-seen wins among duplicates
 
 ## Architecture
@@ -29,9 +29,10 @@ Note that this same architecture can be deployed with Nomad, where Caddy Consul 
 
 ```bash
 xcaddy build \
-    --with github.com/honest-hosting/caddy-consul \
-    --with github.com/mholt/caddy-l4@...
+    --with github.com/honest-hosting/caddy-consul
 ```
+
+> caddy-consul manages TCP/L4 listeners in-process, so **`caddy-l4` is no longer required** in the build.
 
 ## Configuration
 
@@ -60,9 +61,10 @@ xcaddy build \
 | `connect_tag` | Sentinel tag for connect proxy discovery | `caddy-consul-connect` |
 | `connect_port_range_start` | Start of port range for dynamic sidecar upstreams | `19000` |
 | `connect_port_range_end` | End of port range for dynamic sidecar upstreams | `29000` |
-| `caddy_admin_api` | Caddy admin API address for TCP route reconciliation | `localhost:2019` |
+| `caddy_admin_api` | Caddy admin API address (used to detect the admin port so it is never bound for a TCP route) | `localhost:2019` |
 | `data_dir` | Directory for runtime state (persisted across reloads) | `$XDG_DATA_HOME/caddy/caddy-consul` |
-| `metrics` | Admin API path for Prometheus metrics | _(empty, disabled)_ |
+| `metrics` | Enable Prometheus metrics, served at the admin `/consul/metrics` route (any non-empty value enables) | _(empty, disabled)_ |
+| `tcp_drain` | Grace period before force-closing in-flight TCP connections when a listener port is removed | `30s` |
 | `l4_mode` | Layer 4 routing mode: `global` or `node` | `global` |
 | `l4_node_hostname` | Explicit Consul node name override for `l4_mode=node` | _(auto-detected from agent)_ |
 | `no_cache_status` | Status codes that trigger no-cache headers (`Cache-Control: no-cache, no-store, must-revalidate`, `Pragma: no-cache`, `Expires: 0`) on responses. Accepts class wildcards (`3xx`, `4xx`, `5xx`) and individual codes (`502`, `503`). Case-insensitive. | _(empty, no modification)_ |
@@ -87,13 +89,13 @@ Minimal configuration:
 }
 ```
 
-**Note:** The `consul_proxy` handler must be added to your server block. It dynamically routes HTTP requests based on Consul service discovery. Static routes defined before `consul_proxy` take precedence. The Caddy admin API is only needed for TCP/L4 route management.
+**Note:** The `consul_proxy` handler must be added to your server block. It dynamically routes HTTP requests based on Consul service discovery. Static routes defined before `consul_proxy` take precedence. TCP/L4 routing is handled by self-managed in-process listeners and does **not** use the admin API. The admin API is still recommended (Caddy enables it by default) — it serves the plugin's `/consul/*` debug and metrics endpoints, and caddy-consul reads its port only to avoid binding a TCP route over it.
 
 ### Complete Caddyfile Example
 
 ```caddyfile
 {
-    # Admin API required for caddy-consul
+    # Admin API (recommended) — serves the /consul/* debug + metrics endpoints
     admin localhost:2019
 
     consul {
@@ -461,16 +463,25 @@ If both metadata and Fabio tags exist, metadata takes precedence.
 
 ## Architecture
 
-### How `consul_proxy` works
+### How routing works
 
-HTTP routing uses an in-memory route table — **no Caddy config reloads** for HTTP route changes:
+Both HTTP and TCP routing apply **fully in-memory — no Caddy config reloads** when Consul state changes. This is the key property: because Consul churn never mutates Caddy's config, the `tls` app is never torn down, and ACME issuance/renewal is never interrupted by service convergence.
+
+**HTTP** uses an in-memory route table:
 
 1. The `consul` app watches Consul for service changes using **2 blocking queries** (catalog + health state)
-2. On change, routes are compiled and the in-memory route table is updated
+2. On change, routes are compiled and the in-memory route table is updated atomically
 3. The `consul_proxy` HTTP handler matches each request against the route table at request time
 4. Static routes defined in your Caddyfile run first (before `consul_proxy`) and always win
 
-TCP routing uses the Caddy admin API to create L4 servers (since new TCP listener ports require config changes). TCP state is persisted across reloads to prevent cascading reload cycles.
+**TCP/L4** uses self-managed listeners (no caddy-l4, no admin API):
+
+1. The compiler produces a desired set of TCP routes (port, optional SNI, upstreams, passthrough)
+2. An atomic TCP route table is swapped on every converge — so instance/health churn (the common case) is a pure in-memory update that touches **no sockets**
+3. A listener manager reconciles the desired *port* set against open listeners: it opens a new pooled listener for a new port and closes one for a removed port (only port-set changes touch sockets)
+4. Each connection is matched at accept time — for SNI-routed (TLS-passthrough) ports it peeks the ClientHello SNI (without terminating TLS) and replays the bytes to the chosen backend; plain TCP ports proxy straight through
+
+**Reload survival.** TCP listeners are opened via Caddy's reference-counted listener pool, so they survive an unrelated base-config reload with zero downtime: the incoming app instance re-opens the same ports (synchronously, from persisted state) before the outgoing instance closes them, so the socket's refcount never reaches zero. In-flight connections drain over `tcp_drain` (default 30s), then are force-closed.
 
 ### Scaling
 
@@ -488,9 +499,10 @@ Health changes (node failure, instance recovery) update cached state locally —
 
 ### Admin API endpoints
 
-- `GET /consul/metrics` — Prometheus metrics (if enabled)
+- `GET /consul/metrics` — Prometheus metrics (if `metrics` is enabled)
 - `GET /consul/state` — JSON dump of current state
 - `GET /consul/routes` — JSON dump of in-memory HTTP route table
+- `GET /consul/tcp` — JSON dump of in-memory TCP route table (port, SNI, upstreams, passthrough)
 
 ## Routing
 
@@ -507,19 +519,20 @@ The `consul_proxy` handler dynamically routes HTTP requests based on Consul serv
 
 ### TCP Routing
 
-TCP routes automatically create L4 (caddy-l4) servers:
-- `urlprefix-:5432 proto=tcp` creates a listener on port 5432
-- Multiple services on the same port are disambiguated by SNI matching
-- TLS passthrough forwards encrypted traffic without termination
+TCP routes open self-managed in-process listeners (no caddy-l4, no admin API, no config reload):
+- `urlprefix-:5432 proto=tcp` opens a listener on port 5432
+- Multiple services on the same port are disambiguated by SNI matching (TLS passthrough)
+- TLS passthrough forwards encrypted traffic without termination — the ClientHello is peeked for SNI only, then replayed verbatim to the backend
+- Listeners bind `0.0.0.0`. The ports `80`, `443`, and the Caddy admin port are reserved and will never be bound for a TCP route
 
 #### L4 Mode
 
-The `l4_mode` option controls how TCP/TLS-passthrough routes are materialized:
+The `l4_mode` option controls which TCP/TLS-passthrough listeners are opened:
 
 | Mode | Behavior |
 |------|----------|
-| `global` (default) | All TCP/L4 routes are created regardless of which node Caddy runs on |
-| `node` | TCP/L4 routes are only created when at least one healthy upstream runs on the same Consul node as Caddy |
+| `global` (default) | All TCP/L4 routes open a listener regardless of which node Caddy runs on |
+| `node` | A TCP/L4 listener is only opened when at least one healthy upstream runs on the same Consul node as Caddy |
 
 In `node` mode, the plugin resolves the local Consul node name automatically from the agent. Use `l4_node_hostname` to override this with an explicit node name (useful when Caddy's hostname doesn't match the Consul node name).
 
@@ -611,26 +624,44 @@ When no healthy upstreams remain for a service, the route is removed until healt
 
 ### Prometheus Metrics
 
-When metrics are enabled (`metrics /metrics/consul`):
+Enable metrics by setting `metrics` to any non-empty value (e.g. `metrics /metrics/consul`). Metrics are served at the admin **`/consul/metrics`** endpoint.
+
+**Converge / routing:**
 
 | Metric | Type | Description |
 |--------|------|-------------|
 | `caddy_consul_services_total` | Gauge | Number of watched services |
-| `caddy_consul_routes_total` | Gauge | Active routes by protocol |
-| `caddy_consul_upstreams_healthy` | Gauge | Healthy upstreams per service |
-| `caddy_consul_upstreams_total` | Gauge | Total upstreams per service |
-| `caddy_consul_reconcile_duration_seconds` | Histogram | Reconciliation timing |
-| `caddy_consul_reconcile_errors_total` | Counter | Reconciliation failures |
-| `caddy_consul_watcher_errors_total` | Counter | Consul watch errors |
-| `caddy_consul_conflicts_total` | Counter | Route conflicts by type |
-| `caddy_consul_debounce_events_total` | Counter | Debounce flush events |
+| `caddy_consul_routes_total{protocol}` | Gauge | Active routes by protocol (`http`/`tcp`) |
+| `caddy_consul_reconcile_duration_seconds` | Histogram | Time to process one converge (`onServicesChanged`) |
+| `caddy_consul_reconcile_errors_total` | Counter | Converge failures (e.g. TCP listener reconcile error) |
+| `caddy_consul_conflicts_total{type}` | Counter | Route conflicts by type |
+| `caddy_consul_debounce_events_total` | Counter | Debounce flush events (one per converge) |
+
+**TCP/L4 self-managed listeners:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `caddy_consul_tcp_listeners_active` | Gauge | Dynamic TCP listeners currently open |
+| `caddy_consul_tcp_listener_opens_total` | Counter | Listeners opened |
+| `caddy_consul_tcp_listener_closes_total` | Counter | Listeners closed |
+| `caddy_consul_tcp_listen_errors_total` | Counter | Failures to open a listener (e.g. address in use) |
+| `caddy_consul_tcp_connections_total` | Counter | Accepted TCP connections |
+| `caddy_consul_tcp_connections_active` | Gauge | Currently active proxied TCP connections |
+| `caddy_consul_tcp_no_route_total` | Counter | Connections dropped: no matching route (incl. SNI mismatch) |
+| `caddy_consul_tcp_no_upstream_total` | Counter | Connections dropped: matched route had no healthy upstream |
+| `caddy_consul_tcp_upstream_dial_errors_total` | Counter | Failed upstream dials |
+| `caddy_consul_tcp_force_closed_total` | Counter | Connections force-closed after the `tcp_drain` grace period |
+
+> `caddy_consul_watcher_errors_total` and the per-service `caddy_consul_upstreams_healthy|total{service}` gauges are registered but not yet recorded (reserved).
 
 ### Admin API Endpoints
 
-Available when Caddy admin API is enabled:
+Available when the Caddy admin API is enabled:
 
 - `GET /consul/metrics` — Prometheus metrics
 - `GET /consul/state` — JSON dump of current routing state
+- `GET /consul/routes` — JSON dump of the in-memory HTTP route table
+- `GET /consul/tcp` — JSON dump of the in-memory TCP route table
 
 ### Prometheus Scrape Configuration
 
@@ -758,8 +789,8 @@ consul acl token create \
 4. Check the admin API: `curl http://localhost:2019/consul/state`
 
 ### Caddy won't start?
-1. Ensure `admin` is not set to `off` — caddy-consul requires the admin API
-2. Check Consul connectivity: `curl http://127.0.0.1:8500/v1/status/leader`
+1. Check Consul connectivity: `curl http://127.0.0.1:8500/v1/status/leader`
+2. Routing no longer requires the admin API, but keeping `admin` enabled (the default) is recommended — it serves the `/consul/*` debug and metrics endpoints. If `admin off` is set, those endpoints are unavailable but routing still works.
 
 ### Stale routes after Consul changes?
 1. Check the debounce duration — changes are batched within the debounce window

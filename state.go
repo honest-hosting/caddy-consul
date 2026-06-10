@@ -38,9 +38,8 @@ type persistedState struct {
 	HTTPRoutes    []CompiledHTTPRoute `json:"http_routes,omitempty"`
 	HTTPRouteHash string              `json:"http_route_hash,omitempty"`
 
-	// TCP reconciler state
-	TCPServerHashes map[string]string `json:"tcp_server_hashes,omitempty"`
-	TCPServerNames  []string          `json:"tcp_server_names,omitempty"`
+	// Compiled TCP routes — re-opened as listeners by Start() after a reload.
+	TCPRoutes []CompiledTCPRoute `json:"tcp_routes,omitempty"`
 
 	// Connect upstream port allocations: service name → local bind port
 	UpstreamAllocations map[string]int `json:"upstream_allocations,omitempty"`
@@ -92,7 +91,7 @@ func (sm *stateManager) Load() {
 		zap.String("http_hash", sm.state.HTTPRouteHash),
 		zap.Int("services", len(sm.state.Services)),
 		zap.Int("http_routes", len(sm.state.HTTPRoutes)),
-		zap.Int("tcp_servers", len(sm.state.TCPServerNames)),
+		zap.Int("tcp_routes", len(sm.state.TCPRoutes)),
 		zap.Uint64("catalog_index", sm.state.CatalogIndex),
 	)
 }
@@ -152,19 +151,18 @@ func (sm *stateManager) SetHTTPRoutes(routes []CompiledHTTPRoute) {
 	sm.state.HTTPRoutes = routes
 }
 
-// TCPState returns the persisted TCP server hashes and names.
-func (sm *stateManager) TCPState() (map[string]string, []string) {
+// TCPRoutes returns the persisted compiled TCP routes.
+func (sm *stateManager) TCPRoutes() []CompiledTCPRoute {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	return sm.state.TCPServerHashes, sm.state.TCPServerNames
+	return sm.state.TCPRoutes
 }
 
-// SetTCPState updates the persisted TCP state.
-func (sm *stateManager) SetTCPState(hashes map[string]string, names []string) {
+// SetTCPRoutes updates the persisted TCP routes.
+func (sm *stateManager) SetTCPRoutes(routes []CompiledTCPRoute) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	sm.state.TCPServerHashes = hashes
-	sm.state.TCPServerNames = names
+	sm.state.TCPRoutes = routes
 }
 
 // HealthStateIndex returns the persisted health state watch index.

@@ -64,34 +64,6 @@ func TestConcurrent_MetadataParserParallel(t *testing.T) {
 	wg.Wait()
 }
 
-// TestConcurrent_ReconcilerApplyTCP verifies that concurrent ApplyTCP() calls are
-// serialized by the mutex and don't race on hash map or server name state.
-func TestConcurrent_ReconcilerApplyTCP(t *testing.T) {
-	ts := mockCaddyAdmin(nil)
-	defer ts.Close()
-
-	rec := NewReconciler(testLogger(), ts.Listener.Addr().String())
-
-	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			compiled := &CompiledConfig{
-				TCPRoutes: []CompiledTCPRoute{
-					{
-						Port:        5000 + n,
-						ServiceName: fmt.Sprintf("tcp-svc-%d", n),
-						Upstreams:   []Upstream{{Address: fmt.Sprintf("10.0.0.%d:5432", n%256)}},
-					},
-				},
-			}
-			_ = rec.ApplyTCP(compiled)
-		}(i)
-	}
-	wg.Wait()
-}
-
 // TestConcurrent_RouteTableUpdateMatch verifies that concurrent Update and Match
 // calls on the RouteTable don't race.
 func TestConcurrent_RouteTableUpdateMatch(t *testing.T) {
@@ -222,26 +194,6 @@ func TestConcurrent_WatcherDebounce(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestConcurrent_HashInterface verifies hashInterface is safe for concurrent use.
-func TestConcurrent_HashInterface(t *testing.T) {
-	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			val := map[string]interface{}{
-				"handler": "reverse_proxy",
-				"upstreams": []interface{}{
-					map[string]interface{}{"dial": fmt.Sprintf("10.0.0.%d:8080", n)},
-				},
-			}
-			h := hashInterface(val)
-			assert.NotEmpty(t, h)
-		}(i)
-	}
-	wg.Wait()
-}
-
 // BenchmarkCompile benchmarks the route compiler with varying route counts.
 func BenchmarkCompile(b *testing.B) {
 	for _, count := range []int{1, 10, 100, 500} {
@@ -349,29 +301,6 @@ func BenchmarkBuildHTTPRouteJSON(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = BuildHTTPRouteJSON(route)
-	}
-}
-
-// BenchmarkHashInterface benchmarks the route fingerprinting used by the reconciler.
-func BenchmarkHashInterface(b *testing.B) {
-	route := map[string]interface{}{
-		"match": []interface{}{
-			map[string]interface{}{
-				"host": []interface{}{"app.example.com"},
-				"path": []interface{}{"/api*"},
-			},
-		},
-		"handle": []interface{}{
-			map[string]interface{}{
-				"handler":   "reverse_proxy",
-				"upstreams": []interface{}{map[string]interface{}{"dial": "10.0.0.1:8080"}},
-			},
-		},
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		hashInterface(route)
 	}
 }
 

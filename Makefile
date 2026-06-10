@@ -20,9 +20,8 @@ lint: ## Run linter against codebase
 build: export GO_VERSION       ?= 1.25.6
 build: export XCADDY_VERSION   ?= 0.4.5
 build: export CADDY_VERSION    ?= 2.11.2
-build: export CADDY_L4_VERSION ?= afd229714fb14a387f0736cab048afeb72b8946a
 build: lint ## Run 'docker composer build' to build caddy with plugin, copy output binary to ./bin/caddy
-	@docker compose build --build-arg GO_VERSION=$(GO_VERSION) --build-arg XCADDY_VERSION=$(XCADDY_VERSION) --build-arg CADDY_VERSION=$(CADDY_VERSION) --build-arg CADDY_L4_VERSION=$(CADDY_L4_VERSION)
+	@docker compose build --build-arg GO_VERSION=$(GO_VERSION) --build-arg XCADDY_VERSION=$(XCADDY_VERSION) --build-arg CADDY_VERSION=$(CADDY_VERSION)
 	@CID=$$(docker create caddy-consul-integration-test:latest);          \
 		docker cp $$CID:/usr/local/bin/caddy ./bin/caddy >/dev/null 2>&1;   \
 		docker rm $$CID >/dev/null

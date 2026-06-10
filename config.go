@@ -33,6 +33,7 @@ const (
 	DefaultConnectPortStart    = 19000
 	DefaultConnectPortEnd      = 29000
 	DefaultL4Mode              = "global"
+	DefaultTCPDrain            = "30s"
 
 	// MaxServiceNameLen is the max length for a Consul service name (DNS label).
 	MaxServiceNameLen = 63
@@ -295,6 +296,12 @@ func (cr *ConsulRouter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 			cr.NoCacheStatus = d.Val()
 
+		case "tcp_drain":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			cr.TCPDrain = d.Val()
+
 		default:
 			return d.Errf("unrecognized consul option: %s", d.Val())
 		}
@@ -375,6 +382,9 @@ func (cr *ConsulRouter) applyDefaults() {
 	if cr.L4Mode == "" {
 		cr.L4Mode = DefaultL4Mode
 	}
+	if cr.TCPDrain == "" {
+		cr.TCPDrain = DefaultTCPDrain
+	}
 }
 
 // validate checks that all configuration values are valid.
@@ -393,6 +403,12 @@ func (cr *ConsulRouter) validate() error {
 
 	if _, err := time.ParseDuration(cr.DebounceDuration); err != nil {
 		return fmt.Errorf("invalid debounce duration '%s': %w", cr.DebounceDuration, err)
+	}
+
+	if cr.TCPDrain != "" {
+		if _, err := time.ParseDuration(cr.TCPDrain); err != nil {
+			return fmt.Errorf("invalid tcp_drain duration '%s': %w", cr.TCPDrain, err)
+		}
 	}
 
 	if cr.ConsulScheme != "http" && cr.ConsulScheme != "https" {
@@ -493,6 +509,13 @@ func (cr *ConsulRouter) parsedPollInterval() time.Duration {
 // parsedFullSyncInterval returns the parsed full sync interval duration.
 func (cr *ConsulRouter) parsedFullSyncInterval() time.Duration {
 	d, _ := time.ParseDuration(cr.FullSyncInterval)
+	return d
+}
+
+// parsedTCPDrain returns the TCP connection drain grace period. Returns 0 if
+// unset/invalid, in which case the listener manager applies its own default.
+func (cr *ConsulRouter) parsedTCPDrain() time.Duration {
+	d, _ := time.ParseDuration(cr.TCPDrain)
 	return d
 }
 
