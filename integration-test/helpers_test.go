@@ -225,20 +225,6 @@ func dialTCP(addr string, send string, timeout time.Duration) (string, error) {
 	return string(buf[:n]), nil
 }
 
-// waitForTCP polls a TCP address until a connection succeeds.
-func waitForTCP(addr string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return fmt.Errorf("TCP %s not reachable within %s", addr, timeout)
-}
-
 // registerTCPService registers a TCP service in Consul with the urlprefix- tag.
 func registerTCPService(client *consul.Client, name, address string, servicePort, listenPort int) error {
 	return registerService(client, name, address, servicePort,
@@ -326,6 +312,42 @@ type consulRouteEntry struct {
 		Weight  int    `json:"Weight"`
 		Healthy bool   `json:"Healthy"`
 	} `json:"Upstreams"`
+}
+
+// consulTCPRouteEntry represents a route from the /consul/tcp admin endpoint
+// (the in-memory TCP route table). Field names are capitalized because
+// CompiledTCPRoute carries no json tags.
+type consulTCPRouteEntry struct {
+	Port        int    `json:"Port"`
+	SNI         string `json:"SNI"`
+	Passthrough bool   `json:"Passthrough"`
+	ServiceName string `json:"ServiceName"`
+	Upstreams   []struct {
+		Address string `json:"Address"`
+		Weight  int    `json:"Weight"`
+		Healthy bool   `json:"Healthy"`
+	} `json:"Upstreams"`
+}
+
+// getConsulTCPRoutes fetches the in-memory TCP route table from /consul/tcp.
+func getConsulTCPRoutes() ([]consulTCPRouteEntry, error) {
+	url := fmt.Sprintf("http://%s/consul/tcp", caddyAdmin)
+	resp, err := http.Get(url) //nolint:noctx // test helper
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var routes []consulTCPRouteEntry
+	if err := json.Unmarshal(body, &routes); err != nil {
+		return nil, err
+	}
+	return routes, nil
 }
 
 // getConsulRoutes fetches the in-memory route table from the /consul/routes admin endpoint.
@@ -538,61 +560,39 @@ func waitForHTTPRouteGone(host string, timeout time.Duration) error {
 	return fmt.Errorf("HTTP route for host %s still present in Caddy config after %s", host, timeout)
 }
 
-// getCaddyTCPServer returns a specific L4 TCP server from Caddy's config.
-func getCaddyTCPServer(serverName string) (map[string]interface{}, error) {
-	url := fmt.Sprintf("http://%s/config/apps/layer4/servers/%s", caddyAdmin, serverName)
-	resp, err := http.Get(url) //nolint:noctx // test helper
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s returned %d", url, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var server map[string]interface{}
-	if err := json.Unmarshal(body, &server); err != nil {
-		return nil, err
-	}
-	if server == nil {
-		return nil, fmt.Errorf("GET %s returned null", url)
-	}
-	return server, nil
-}
-
-// getL4ProxyUpstreamDial extracts the first dial address from an L4 proxy upstream.
-// In caddy-l4, the "dial" field is an array of strings (e.g. ["10.0.0.1:8080"]).
-func getL4ProxyUpstreamDial(upstream map[string]interface{}) string {
-	switch d := upstream["dial"].(type) {
-	case string:
-		return d
-	case []interface{}:
-		if len(d) > 0 {
-			if s, ok := d[0].(string); ok {
-				return s
-			}
+// waitForTCPRoute polls a TCP address until it proxies through to the echo
+// backend (which replies "TCP-OK"). This is more reliable than a bare dial: a
+// port published through docker can accept a connection even before the
+// in-container listener is ready, so we assert on the backend's response, not
+// merely on connection success.
+func waitForTCPRoute(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		resp, err := dialTCP(addr, "", 2*time.Second)
+		if err == nil && strings.Contains(resp, "TCP-OK") {
+			return nil
 		}
+		lastErr = err
+		time.Sleep(500 * time.Millisecond)
 	}
-	return ""
+	return fmt.Errorf("TCP %s did not proxy to the backend within %s (last err: %v)", addr, timeout, lastErr)
 }
 
-// waitForCaddyTCPServerGone polls Caddy config until an L4 server disappears.
-func waitForCaddyTCPServerGone(serverName string, timeout time.Duration) error {
+// waitForTCPRouteGone polls until a TCP address no longer proxies to the backend
+// (no "TCP-OK" response), indicating the self-managed listener/route was removed.
+// A dial may still "succeed" via docker's port proxy after the in-container
+// listener closes, so we check for the absence of the backend response.
+func waitForTCPRouteGone(addr string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		_, err := getCaddyTCPServer(serverName)
-		if err != nil {
-			return nil // server is gone
+		resp, err := dialTCP(addr, "", 2*time.Second)
+		if err != nil || !strings.Contains(resp, "TCP-OK") {
+			return nil // route gone
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("L4 server %s still present in Caddy config after %s", serverName, timeout)
+	return fmt.Errorf("TCP route %s still serving the backend after %s", addr, timeout)
 }
 
 // getConsulCheck returns a specific health check by ID from the local agent.

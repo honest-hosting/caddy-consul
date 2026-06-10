@@ -2,9 +2,9 @@ package caddyconsul
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -42,6 +42,10 @@ type ConsulRouter struct {
 	PollInterval       string `json:"poll_interval,omitempty"`
 	FullSyncInterval   string `json:"full_sync_interval,omitempty"`
 
+	// Grace period before force-closing in-flight TCP connections when a
+	// listener port is removed. Default 30s.
+	TCPDrain string `json:"tcp_drain,omitempty"`
+
 	// Connect
 	ConnectServiceName  string `json:"connect_service_name,omitempty"`
 	ConnectAutoRegister *bool  `json:"connect_auto_register,omitempty"`
@@ -76,7 +80,6 @@ type ConsulRouter struct {
 	// Internal (not serialized)
 	watcher         *ConsulWatcher    `json:"-"`
 	compiler        *RouteCompiler    `json:"-"`
-	reconciler      *Reconciler       `json:"-"`
 	routeTable      *RouteTable       `json:"-"`
 	stateMgr        *stateManager     `json:"-"`
 	sidecarResolver *SidecarResolver  `json:"-"`
@@ -85,6 +88,13 @@ type ConsulRouter struct {
 	sidecarWarnOnce *sync.Once        `json:"-"`
 	nodeName        string            `json:"-"` // resolved local node name for l4_mode=node
 	noCacheMatcher  *StatusMatcher    `json:"-"` // parsed global no-cache matcher (nil = no modification)
+
+	// In-memory TCP data plane (self-managed listeners — no admin API, no reloads)
+	ctx          caddy.Context       `json:"-"` // stored for pooled TCP Listen (plan §6)
+	tcpTable     *TCPTable           `json:"-"`
+	tcpProxy     *tcpProxy           `json:"-"`
+	tcpListeners *TCPListenerManager `json:"-"`
+	metrics      *MetricsCollector   `json:"-"` // nil when `metrics` not configured
 }
 
 // RouteTable returns the shared route table for the consul_proxy handler.
@@ -109,6 +119,7 @@ func (ConsulRouter) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the ConsulRouter.
 func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 	cr.logger = ctx.Logger()
+	cr.ctx = ctx // stored for pooled TCP Listen during Start/reconcile (plan §6)
 
 	cr.applyDefaults()
 
@@ -123,6 +134,14 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 			return fmt.Errorf("caddy-consul: invalid no_cache_status: %w", err)
 		}
 		cr.noCacheMatcher = matcher
+	}
+
+	// Enable Prometheus metrics when configured. The collector is global and
+	// survives reloads (created once); leaving cr.metrics nil disables all
+	// recording via nil-safe recorders. Served at the admin /consul/metrics route.
+	if cr.Metrics != "" {
+		cr.metrics = GetOrCreateGlobalMetrics(cr.logger)
+		cr.logger.Info("caddy-consul metrics enabled", zap.String("path", cr.Metrics))
 	}
 
 	adminAddr := cr.CaddyAdminAPI
@@ -192,10 +211,21 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 			)
 		}
 
-		// Initialize reconciler for TCP routes (with persisted state from prior reload)
-		cr.reconciler = NewReconciler(cr.logger, adminAddr)
-		tcpHashes, tcpNames := cr.stateMgr.TCPState()
-		cr.reconciler.RestoreTCPState(tcpHashes, tcpNames)
+		// Initialize the in-memory TCP data plane (self-managed listeners — no
+		// Caddy admin API, no config reloads). Warm the route table from
+		// persisted state so Start() can re-open listeners before the outgoing
+		// app instance stops (pooled-listener handoff; see plan §6).
+		cr.tcpTable = NewTCPTable()
+		globalTCPTable.Store(cr.tcpTable) // expose to the admin /consul/tcp endpoint
+		if persistedTCP := cr.stateMgr.TCPRoutes(); len(persistedTCP) > 0 {
+			cr.tcpTable.Update(persistedTCP)
+			cr.logger.Info("restored TCP routes from persisted state",
+				zap.Int("routes", len(persistedTCP)),
+			)
+		}
+		cr.tcpProxy = newTCPProxy(cr.logger, cr.tcpTable, cr.metrics, defaultTCPPeekTimeout, defaultTCPDialTimeout)
+		cr.tcpListeners = NewTCPListenerManager(ctx, cr.logger, cr.tcpTable, cr.tcpProxy, cr.metrics,
+			cr.parsedTCPDrain(), cr.reservedTCPPorts())
 
 		cr.watcher = NewConsulWatcher(
 			consulClient,
@@ -266,6 +296,25 @@ func (cr *ConsulRouter) Start() error {
 		}
 	}
 
+	// Re-open TCP listeners SYNCHRONOUSLY from persisted state (warmed into the
+	// table during Provision) before returning from Start. Caddy runs the new
+	// instance's Start() to completion before the old instance's Stop(), so
+	// opening the same ports here (pooled Listen, refcount 1->2) before the old
+	// instance closes them (2->1) hands the socket off with zero downtime — see
+	// plan §6 (spike-verified). Uses only in-memory data: zero Consul queries.
+	if cr.tcpListeners != nil {
+		if ports := cr.tcpTable.Ports(); len(ports) > 0 {
+			cr.logger.Info("re-opening TCP listeners from persisted state",
+				zap.Int("ports", len(ports)),
+			)
+			if err := cr.tcpListeners.Reconcile(ports); err != nil {
+				cr.logger.Error("some TCP listeners failed to re-open from persisted state",
+					zap.Error(err),
+				)
+			}
+		}
+	}
+
 	if cr.watcher != nil {
 		// Restore watcher state so it resumes blocking queries
 		// instead of re-fetching all services from scratch.
@@ -276,29 +325,6 @@ func (cr *ConsulRouter) Start() error {
 			passingChecks := cr.stateMgr.PassingChecks()
 			if catalogIdx > 0 && len(svcStates) > 0 {
 				cr.watcher.RestoreState(catalogIdx, healthIdx, svcStates, passingChecks)
-			}
-
-			// If there are persisted TCP servers, trigger an initial
-			// reconciliation to re-create L4 listeners from restored state.
-			// This uses only in-memory data — zero Consul queries.
-			_, tcpNames := cr.stateMgr.TCPState()
-			if len(tcpNames) > 0 && len(svcStates) > 0 {
-				cr.logger.Info("re-creating L4 servers from persisted state",
-					zap.Int("tcp_servers", len(tcpNames)),
-				)
-				// Build snapshot from restored service states
-				snapshot := make(map[string]*ServiceState, len(svcStates))
-				for name, pss := range svcStates {
-					snapshot[name] = &ServiceState{
-						Name:      pss.Name,
-						Tags:      pss.Tags,
-						Meta:      pss.Meta,
-						Instances: pss.Instances,
-						LastIndex: pss.LastIndex,
-					}
-				}
-				// Trigger route compilation and TCP reconciliation
-				go cr.onServicesChanged(nil, snapshot)
 			}
 		}
 		cr.watcher.Start()
@@ -319,6 +345,12 @@ func (cr *ConsulRouter) Stop() error {
 	if cr.registrar != nil {
 		cr.registrar.Stop()
 	}
+	// Close TCP listeners (decrements the pooled-listener refcount). On a reload
+	// the incoming instance has already re-opened these in its Start(), so the
+	// sockets survive; in-flight connections drain in the background.
+	if cr.tcpListeners != nil {
+		cr.tcpListeners.Close()
+	}
 	return nil
 }
 
@@ -334,6 +366,11 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		zap.Int("changes", len(changes)),
 		zap.Int("total_services", len(allServices)),
 	)
+
+	// Each callback is one debounced converge; time the whole pass.
+	convergeStart := time.Now()
+	cr.metrics.IncDebounce()
+	defer func() { cr.metrics.ObserveReconcile(time.Since(convergeStart)) }()
 
 	// Parse route definitions from all services
 	var allRoutes []RouteDefinition
@@ -527,6 +564,11 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		)
 	}
 
+	// Record converge route metrics (counts are final after l4_mode filtering).
+	cr.metrics.SetServicesTotal(len(allServices))
+	cr.metrics.SetRoutesTotal("http", httpCount)
+	cr.metrics.SetRoutesTotal("tcp", l4Count)
+
 	// Compile routes
 	compiled := cr.compiler.Compile(allRoutes)
 
@@ -538,6 +580,7 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 			zap.String("loser", c.Loser.ServiceName),
 			zap.String("reason", c.Reason),
 		)
+		cr.metrics.IncConflict(string(c.Type))
 	}
 
 	// Update HTTP routes in-memory (no admin API, no config reload)
@@ -552,10 +595,12 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 		cr.logger.Debug("HTTP routes unchanged, skipping update")
 	}
 
-	// Persist full state to disk BEFORE any admin API calls.
-	// The TCP admin API call may trigger a Caddy reload that kills us
-	// before we can save — so save first.
+	// Persist full state to disk. TCP routes are persisted (mirroring HTTPRoutes)
+	// so Start() can re-open listeners from disk after a reload with zero Consul
+	// queries. There is no admin API / reload to race anymore, but we still save
+	// before applying so a crash can't lose convergence.
 	cr.stateMgr.SetHTTPRoutes(compiled.HTTPRoutes)
+	cr.stateMgr.SetTCPRoutes(compiled.TCPRoutes)
 	cr.stateMgr.SetServiceStates(allServices)
 	if cr.watcher != nil {
 		cr.stateMgr.SetCatalogIndex(cr.watcher.CatalogIndex())
@@ -565,39 +610,33 @@ func (cr *ConsulRouter) onServicesChanged(changes []ServiceChange, allServices m
 	if cr.upstreamMgr != nil {
 		cr.stateMgr.SetUpstreamAllocations(cr.upstreamMgr.Allocations())
 	}
-
-	// Pre-compute TCP hashes for persistence before applying
-	_, existingTCPNames := cr.stateMgr.TCPState()
-	if len(compiled.TCPRoutes) > 0 || len(existingTCPNames) > 0 {
-		grouped := GroupTCPRoutesByPort(compiled.TCPRoutes)
-		desiredHashes := make(map[string]string)
-		desiredNames := make([]string, 0)
-		for port, portRoutes := range grouped {
-			serverJSON, err := BuildTCPServerJSON(port, portRoutes)
-			if err == nil {
-				name := fmt.Sprintf("consul_tcp_%d", port)
-				h := sha256.Sum256(serverJSON)
-				desiredHashes[name] = hex.EncodeToString(h[:])
-				desiredNames = append(desiredNames, name)
-			}
-		}
-		cr.stateMgr.SetTCPState(desiredHashes, desiredNames)
-	}
-
-	// Save state to disk (must happen before admin API calls)
 	cr.stateMgr.Save()
 
-	// NOW apply TCP routes via admin API (may trigger reload — state is safe on disk)
-	if len(compiled.TCPRoutes) > 0 || len(existingTCPNames) > 0 {
-		tcpConfig := &CompiledConfig{
-			TCPRoutes: compiled.TCPRoutes,
-		}
-		if err := cr.reconciler.ApplyTCP(tcpConfig); err != nil {
-			cr.logger.Error("failed to reconcile TCP routes",
+	// Apply TCP routes in-memory: swap the route table atomically, then reconcile
+	// listeners (open new ports / close removed). No Caddy admin API, no config
+	// reload — instance/health churn is a pure table swap; only a new or removed
+	// port touches a listener.
+	if cr.tcpTable != nil {
+		cr.tcpTable.Update(compiled.TCPRoutes)
+		if err := cr.tcpListeners.Reconcile(cr.tcpTable.Ports()); err != nil {
+			cr.logger.Error("failed to reconcile TCP listeners",
 				zap.Error(err),
 			)
+			cr.metrics.IncReconcileError()
 		}
 	}
+}
+
+// reservedTCPPorts returns ports the TCP listener manager must never bind:
+// the HTTP/HTTPS ports plus the Caddy admin API port.
+func (cr *ConsulRouter) reservedTCPPorts() map[int]bool {
+	reserved := map[int]bool{80: true, 443: true}
+	if _, portStr, err := net.SplitHostPort(cr.CaddyAdminAPI); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			reserved[p] = true
+		}
+	}
+	return reserved
 }
 
 // Interface guards

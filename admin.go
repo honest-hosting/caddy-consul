@@ -13,6 +13,10 @@ import (
 // Set by ConsulRouter on Provision.
 var globalRouteTable atomic.Value
 
+// globalTCPTable holds a reference to the active TCPTable for the admin API.
+// Set by ConsulRouter on Provision.
+var globalTCPTable atomic.Value
+
 func init() {
 	caddy.RegisterModule(AdminConsul{})
 }
@@ -36,6 +40,8 @@ func (ac *AdminConsul) Provision(ctx caddy.Context) error {
 	ac.logger.Info("consul admin endpoints registered",
 		zap.String("metrics", "/consul/metrics"),
 		zap.String("state", "/consul/state"),
+		zap.String("routes", "/consul/routes"),
+		zap.String("tcp", "/consul/tcp"),
 	)
 	return nil
 }
@@ -54,6 +60,10 @@ func (ac *AdminConsul) Routes() []caddy.AdminRoute {
 		{
 			Pattern: "/consul/routes",
 			Handler: caddy.AdminHandlerFunc(ac.serveRoutes),
+		},
+		{
+			Pattern: "/consul/tcp",
+			Handler: caddy.AdminHandlerFunc(ac.serveTCP),
 		},
 	}
 }
@@ -114,6 +124,29 @@ func (ac *AdminConsul) serveRoutes(w http.ResponseWriter, r *http.Request) error
 	}
 
 	routes := rt.(*RouteTable).Routes()
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(routes)
+}
+
+// serveTCP serves a JSON dump of the current in-memory TCP route table
+// (port, SNI, upstreams, passthrough) — useful for verifying that TCP/Connect
+// routes resolved correctly without inspecting Caddy's config.
+func (ac *AdminConsul) serveTCP(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodGet {
+		return caddy.APIError{
+			HTTPStatus: http.StatusMethodNotAllowed,
+			Message:    "method not allowed",
+		}
+	}
+
+	tt := globalTCPTable.Load()
+	if tt == nil {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("[]"))
+		return nil
+	}
+
+	routes := tt.(*TCPTable).Snapshot()
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(routes)
 }
