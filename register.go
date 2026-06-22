@@ -2,6 +2,7 @@ package caddyconsul
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,12 +10,39 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	// TTL check parameters. The check is renewed every ttlRenewInterval; the TTL
+	// itself is ttlDuration. Renewing comfortably inside the TTL means a single
+	// missed tick won't flap the service to critical.
+	ttlDuration      = "30s"
+	ttlRenewInterval = 15 * time.Second
+
+	// Backoff bounds for the registration retry loop while Consul is unreachable
+	// (the agent isn't up yet at boot, or a transient outage). Capped so we keep
+	// trying indefinitely without busy-looping.
+	regBackoffMin = 1 * time.Second
+	regBackoffMax = 30 * time.Second
+)
+
 // ServiceRegistrar handles auto-registration of Caddy as a service in Consul
-// with a Connect sidecar proxy definition. This is required for both sidecar
-// and direct Connect modes — without registration, Caddy has no mesh identity.
+// with a Connect sidecar proxy definition. This is required for Connect mode —
+// without registration, Caddy has no mesh identity and no sidecar proxy exists
+// for upstream resolution.
 //
-// The registrar keeps the TTL health check alive via a background goroutine.
-// Registration is idempotent — safe to call on every Caddy config reload.
+// Registration is owned by a single background goroutine (see Start) that is
+// fully self-healing and tolerant of any order-of-operations between Caddy and
+// the Consul agent:
+//
+//   - If Consul is unreachable when Caddy starts (e.g. the agent comes up AFTER
+//     Caddy), it retries with capped backoff until registration succeeds, rather
+//     than failing once and wedging permanently.
+//   - Once registered, it keeps the TTL check passing and re-registers the
+//     service (and its sidecar) automatically if either later disappears — e.g.
+//     a SyncUpstreams re-register that dropped the check, an agent restart that
+//     lost the registration, or a manual deregister.
+//
+// A Consul outage therefore degrades Connect routing gracefully; it never
+// crashes Caddy, which is also serving non-Connect traffic.
 type ServiceRegistrar struct {
 	client      *consul.Client
 	logger      *zap.Logger
@@ -34,33 +62,116 @@ func NewServiceRegistrar(client *consul.Client, logger *zap.Logger, serviceName 
 	}
 }
 
-// Register registers Caddy as a service in Consul with Connect enabled
-// and starts a background goroutine to keep the TTL health check alive.
-// If the service is already registered, it skips re-registration to avoid
-// overwriting existing sidecar proxy configurations (e.g., upstream entries).
-func (sr *ServiceRegistrar) Register() error {
-	// Check if already registered to avoid overwriting sidecar proxy config
-	if _, _, err := sr.client.Agent().Service(sr.serviceName, nil); err == nil {
-		sr.logger.Info("caddy service already registered in consul, skipping re-registration",
-			zap.String("service_name", sr.serviceName),
-		)
+// Start launches the background maintenance loop and returns immediately. It
+// never blocks and never reports a fatal error: registration is retried until
+// it succeeds and is continuously repaired thereafter. Safe to call once per
+// process; subsequent registration work is idempotent.
+func (sr *ServiceRegistrar) Start() {
+	go sr.maintainLoop()
+}
 
-		// Ensure the TTL check exists (it may have expired while Caddy was down,
-		// or been removed by a SyncUpstreams re-registration).
-		// Consul's UpdateTTL API accepts the original CheckID as registered,
-		// NOT the "service:"-prefixed form shown in the UI/Checks() map.
-		checkID := sr.serviceName + "-ttl"
-		if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
-			sr.logger.Info("TTL check not found on startup, re-registering",
-				zap.String("service", sr.serviceName),
-			)
-			sr.ensureCheck(checkID)
+// maintainLoop owns the registration for the life of the process. Phase 1 gets
+// the service registered (retrying through an unreachable Consul); Phase 2 keeps
+// the TTL check alive and repairs the registration if it drifts.
+func (sr *ServiceRegistrar) maintainLoop() {
+	// Phase 1: become registered, backing off while Consul is unreachable.
+	backoff := regBackoffMin
+	for {
+		if sr.stopped() {
+			return
 		}
-
-		go sr.ttlLoop()
-		return nil
+		if err := sr.ensureRegistered(); err != nil {
+			sr.logger.Warn("consul registration not yet successful; will retry",
+				zap.String("service_name", sr.serviceName),
+				zap.Duration("retry_in", backoff),
+				zap.Error(err),
+			)
+			if sr.sleep(backoff) {
+				return // stopped during backoff
+			}
+			backoff *= 2
+			if backoff > regBackoffMax {
+				backoff = regBackoffMax
+			}
+			continue
+		}
+		break
 	}
 
+	// Phase 2: keep the TTL check passing; repair the registration if it drifts
+	// (check removed by a SyncUpstreams re-register, service lost on an agent
+	// restart, Consul flap, etc.). Errors here are never fatal — we simply try
+	// again on the next tick so a transient outage tears nothing down.
+	ticker := time.NewTicker(ttlRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-sr.stopCh:
+			return
+		case <-ticker.C:
+			if err := sr.client.Agent().UpdateTTL(sr.checkID(), "caddy-consul healthy", consul.HealthPassing); err != nil {
+				sr.logger.Info("TTL update failed; re-ensuring registration",
+					zap.String("service_name", sr.serviceName),
+					zap.Error(err),
+				)
+				if err := sr.ensureRegistered(); err != nil {
+					sr.logger.Warn("re-registration attempt failed; will retry on next tick",
+						zap.String("service_name", sr.serviceName),
+						zap.Error(err),
+					)
+				}
+			}
+		}
+	}
+}
+
+// ensureRegistered makes Consul's state match what Connect needs: the main
+// service registered with a sidecar proxy, plus a passing TTL check. It is
+// idempotent and safe to call repeatedly.
+//
+// It returns an error ONLY when Consul is unreachable, so the caller can back
+// off and retry. A missing service, missing sidecar, or missing check is
+// repaired in-line and is NOT reported as an error.
+func (sr *ServiceRegistrar) ensureRegistered() error {
+	// Is the main service present?
+	if _, _, err := sr.client.Agent().Service(sr.serviceName, nil); err != nil {
+		if isNotFound(err) {
+			return sr.registerService() // absent → create it (with sidecar + check)
+		}
+		return fmt.Errorf("querying service %s: %w", sr.serviceName, err) // unreachable → retry
+	}
+
+	// Main service exists. Ensure the Connect sidecar proxy exists too. Consul
+	// auto-creates "<name>-sidecar-proxy" from the SidecarService stanza, but it
+	// can be absent if a prior registration omitted Connect or the sidecar was
+	// removed. If missing, re-register the full service to recreate it. (This is
+	// the gap that previously left the main service present but no sidecar, so
+	// upstream resolution 404'd forever.)
+	sidecarID := sr.serviceName + "-sidecar-proxy"
+	if _, _, err := sr.client.Agent().Service(sidecarID, nil); err != nil {
+		if isNotFound(err) {
+			sr.logger.Info("connect sidecar proxy missing; re-registering service to recreate it",
+				zap.String("service_name", sr.serviceName),
+				zap.String("sidecar_id", sidecarID),
+			)
+			return sr.registerService()
+		}
+		return fmt.Errorf("querying sidecar %s: %w", sidecarID, err)
+	}
+
+	// Service + sidecar present. Make sure the TTL check exists and is passing.
+	// Reaching here means the two queries above succeeded, so Consul is
+	// reachable; a failing UpdateTTL here means the check is missing (e.g. a
+	// SyncUpstreams re-register dropped it), so recreate it.
+	if err := sr.client.Agent().UpdateTTL(sr.checkID(), "caddy-consul healthy", consul.HealthPassing); err != nil {
+		sr.ensureCheck()
+	}
+	return nil
+}
+
+// registerService performs the full service registration, including the Connect
+// sidecar service and the TTL check. ServiceRegister is idempotent in Consul.
+func (sr *ServiceRegistrar) registerService() error {
 	reg := &consul.AgentServiceRegistration{
 		ID:   sr.serviceName,
 		Name: sr.serviceName,
@@ -68,37 +179,58 @@ func (sr *ServiceRegistrar) Register() error {
 			SidecarService: &consul.AgentServiceRegistration{},
 		},
 		Check: &consul.AgentServiceCheck{
-			CheckID: sr.serviceName + "-ttl",
-			TTL:     "30s",
+			CheckID: sr.checkID(),
+			TTL:     ttlDuration,
 			Status:  consul.HealthPassing,
 		},
 	}
-
 	if err := sr.client.Agent().ServiceRegister(reg); err != nil {
-		return fmt.Errorf("failed to register service %s: %w", sr.serviceName, err)
+		return fmt.Errorf("registering service %s: %w", sr.serviceName, err)
 	}
-
-	sr.logger.Info("auto-registered caddy service in consul",
+	sr.logger.Info("registered caddy service in consul",
 		zap.String("service_name", sr.serviceName),
 	)
-
-	// Start TTL updater
-	go sr.ttlLoop()
-
 	return nil
 }
 
-// Stop stops the TTL updater. Does NOT deregister the service — registration
-// persists across config reloads. The TTL will eventually expire if Caddy
-// truly shuts down. Use Deregister() for clean removal on process exit.
+// ensureCheck (re)registers the TTL check against the already-registered service.
+// Used when the service exists but its check was removed (e.g. by a SyncUpstreams
+// re-register that omitted the check). Best-effort: a failure is logged and
+// retried on the next maintenance tick.
+func (sr *ServiceRegistrar) ensureCheck() {
+	check := &consul.AgentCheckRegistration{
+		ID:        sr.checkID(),
+		Name:      sr.serviceName + " TTL",
+		ServiceID: sr.serviceName,
+		AgentServiceCheck: consul.AgentServiceCheck{
+			TTL:    ttlDuration,
+			Status: consul.HealthPassing,
+		},
+	}
+	if err := sr.client.Agent().CheckRegister(check); err != nil {
+		sr.logger.Warn("failed to (re)register TTL check",
+			zap.String("check_id", sr.checkID()),
+			zap.Error(err),
+		)
+		return
+	}
+	sr.logger.Info("restored TTL check",
+		zap.String("check_id", sr.checkID()),
+	)
+}
+
+// Stop stops the maintenance loop. It does NOT deregister the service —
+// registration persists across config reloads (Stop is called on every reload,
+// not just shutdown). The TTL will expire naturally if Caddy truly exits. Use
+// Deregister for clean removal on process exit.
 func (sr *ServiceRegistrar) Stop() {
 	sr.stopOnce.Do(func() {
 		close(sr.stopCh)
 	})
 }
 
-// Deregister removes the service and its sidecar proxy from Consul.
-// This should only be called on actual process exit, not on config reloads.
+// Deregister removes the service and its sidecar proxy from Consul. This should
+// only be called on actual process exit, not on config reloads.
 func (sr *ServiceRegistrar) Deregister() {
 	sr.logger.Info("deregistering caddy service from consul",
 		zap.String("service_name", sr.serviceName),
@@ -109,7 +241,7 @@ func (sr *ServiceRegistrar) Deregister() {
 			zap.Error(err),
 		)
 	}
-	// Consul auto-registers the sidecar proxy with this ID
+	// Consul auto-registers the sidecar proxy with this ID.
 	sidecarID := sr.serviceName + "-sidecar-proxy"
 	if err := sr.client.Agent().ServiceDeregister(sidecarID); err != nil {
 		sr.logger.Warn("failed to deregister sidecar proxy from consul",
@@ -119,76 +251,38 @@ func (sr *ServiceRegistrar) Deregister() {
 	}
 }
 
-// ttlLoop periodically updates the TTL health check to keep the service passing.
-// The check ID matches the raw CheckID from ServiceRegister (no "service:" prefix).
-// Consul's UpdateTTL API expects the original ID, not the prefixed form shown in
-// the Checks() map or UI.
-//
-// If the check disappears (e.g., SyncUpstreams re-registers the service without
-// the check), ttlLoop automatically re-creates it.
-func (sr *ServiceRegistrar) ttlLoop() {
-	checkID := sr.serviceName + "-ttl"
-	ticker := time.NewTicker(15 * time.Second) // update every 15s for a 30s TTL
-	defer ticker.Stop()
+// checkID is the raw CheckID used with ServiceRegister and UpdateTTL. Consul's
+// UpdateTTL API expects this raw ID, NOT the "service:"-prefixed form shown in
+// the UI/Checks() map.
+func (sr *ServiceRegistrar) checkID() string {
+	return sr.serviceName + "-ttl"
+}
 
-	for {
-		select {
-		case <-sr.stopCh:
-			return
-		case <-ticker.C:
-			if err := sr.client.Agent().UpdateTTL(checkID, "caddy-consul healthy", consul.HealthPassing); err != nil {
-				sr.logger.Info("TTL check missing, re-registering",
-					zap.String("check_id", checkID),
-				)
-				sr.ensureCheck(checkID)
-			}
-		}
+// stopped reports whether Stop has been called, without blocking.
+func (sr *ServiceRegistrar) stopped() bool {
+	select {
+	case <-sr.stopCh:
+		return true
+	default:
+		return false
 	}
 }
 
-// ensureCheck re-registers the TTL health check if it has been removed
-// (e.g., by a ServiceRegister call that didn't include the check).
-// If the service itself is gone, it re-registers the full service first.
-func (sr *ServiceRegistrar) ensureCheck(checkID string) {
-	// First check if the service still exists — if not, re-register it.
-	if _, _, err := sr.client.Agent().Service(sr.serviceName, nil); err != nil {
-		sr.logger.Warn("service gone from Consul, re-registering",
-			zap.String("service_name", sr.serviceName),
-		)
-		reg := &consul.AgentServiceRegistration{
-			ID:   sr.serviceName,
-			Name: sr.serviceName,
-			Connect: &consul.AgentServiceConnect{
-				SidecarService: &consul.AgentServiceRegistration{},
-			},
-			Check: &consul.AgentServiceCheck{
-				CheckID: checkID,
-				TTL:     "30s",
-				Status:  consul.HealthPassing,
-			},
-		}
-		if err := sr.client.Agent().ServiceRegister(reg); err != nil {
-			sr.logger.Warn("failed to re-register service",
-				zap.String("service_name", sr.serviceName),
-				zap.Error(err),
-			)
-		}
-		return
+// sleep waits for d, or until Stop is called. Returns true if it was stopped.
+func (sr *ServiceRegistrar) sleep(d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-sr.stopCh:
+		return true
+	case <-t.C:
+		return false
 	}
+}
 
-	check := &consul.AgentCheckRegistration{
-		ID:        checkID,
-		Name:      sr.serviceName + " TTL",
-		ServiceID: sr.serviceName,
-		AgentServiceCheck: consul.AgentServiceCheck{
-			TTL:    "30s",
-			Status: consul.HealthPassing,
-		},
-	}
-	if err := sr.client.Agent().CheckRegister(check); err != nil {
-		sr.logger.Warn("failed to re-register TTL check",
-			zap.String("check_id", checkID),
-			zap.Error(err),
-		)
-	}
+// isNotFound reports whether a Consul API error is a 404 (service/check absent),
+// as opposed to an unreachable agent. The Consul API client returns untyped
+// errors of the form "Unexpected response code: 404 (...)".
+func isNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Unexpected response code: 404")
 }
