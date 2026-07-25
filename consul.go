@@ -287,13 +287,14 @@ func (cr *ConsulRouter) Provision(ctx caddy.Context) error {
 func (cr *ConsulRouter) Start() error {
 	cr.logger.Info("caddy-consul starting")
 
-	// Auto-register Caddy as a service in Consul
+	// Auto-register Caddy as a service in Consul. This is asynchronous and
+	// self-healing: it retries until the agent is reachable (handling the case
+	// where Consul starts AFTER Caddy) and re-registers if the service later
+	// disappears, so a boot race or a Consul restart can never permanently wedge
+	// Connect routing. A Consul outage degrades Connect gracefully without
+	// crashing Caddy, which is also serving non-Connect traffic.
 	if cr.registrar != nil {
-		if err := cr.registrar.Register(); err != nil {
-			cr.logger.Error("failed to auto-register in consul (continuing without connect)",
-				zap.Error(err),
-			)
-		}
+		cr.registrar.Start()
 	}
 
 	// Re-open TCP listeners SYNCHRONOUSLY from persisted state (warmed into the
