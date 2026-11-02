@@ -1,22 +1,13 @@
 # Stage 1: Builder
-# Same builder image as caddy-sidekick and the fleet's frankenwp-base build, so Go comes from one
-# place (/usr/local/go, already first on PATH) instead of a separate pin it could silently override.
-FROM dunglas/frankenphp:builder-php8.3-bookworm AS builder
+# Go 1.26 matches the toolchain the production build uses (the klm/caddy Habitat package builds
+# with core/go26); Caddy 2.11.x needs Go >= 1.26. Pinned to the minor series here rather than via a
+# separate GO_VERSION build arg.
+FROM golang:1.26-bookworm AS builder
 
 ARG XCADDY_VERSION
 ARG CADDY_VERSION
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates     \
-    curl                \
-    git                 \
-    && apt-get clean    \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install xcaddy
-WORKDIR /tmp
-RUN curl --silent -Lo - https://github.com/caddyserver/xcaddy/releases/download/v${XCADDY_VERSION}/xcaddy_${XCADDY_VERSION}_linux_amd64.tar.gz | tar -zxf - && install -D /tmp/xcaddy /usr/local/bin/xcaddy
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}
 
 WORKDIR /src
 COPY . .

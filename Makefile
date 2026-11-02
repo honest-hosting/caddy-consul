@@ -16,8 +16,8 @@ lint: ## Run linter against codebase
 	@golangci-lint -v run
 .PHONY: lint
 
-# xcaddy / Caddy versions match caddy-sidekick (and the fleet's frankenwp-base image). Go comes
-# from the dunglas/frankenphp builder image, as it does there.
+# xcaddy / Caddy versions match caddy-sidekick, the fleet's frankenwp-base image and the klm/caddy
+# Habitat package. Go is the Dockerfile's golang:1.26 builder (no separate GO_VERSION).
 build: export XCADDY_VERSION   ?= 0.4.7
 build: export CADDY_VERSION    ?= 2.11.7
 build: lint ## Run 'docker composer build' to build caddy with plugin, copy output binary to ./bin/caddy
