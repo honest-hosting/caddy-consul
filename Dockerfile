@@ -1,7 +1,8 @@
-ARG GO_VERSION=1.25.2
-
 # Stage 1: Builder
-FROM golang:${GO_VERSION}-bookworm AS builder
+# Go 1.26 matches the toolchain the production build uses (the klm/caddy Habitat package builds
+# with core/go26); Caddy 2.11.x needs Go >= 1.26. Pinned to the minor series here rather than via a
+# separate GO_VERSION build arg.
+FROM golang:1.26-bookworm AS builder
 
 ARG XCADDY_VERSION
 ARG CADDY_VERSION
@@ -15,6 +16,8 @@ COPY . .
 RUN xcaddy build v${CADDY_VERSION} \
     --with github.com/honest-hosting/caddy-consul=/src \
     --output /usr/local/bin/caddy
+
+RUN /usr/local/bin/caddy version
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim

@@ -517,6 +517,38 @@ The `consul_proxy` handler dynamically routes HTTP requests based on Consul serv
 - Strip-prefix rewrite
 - HTTP redirects
 
+#### Forwarded headers
+
+`consul_proxy` sets `X-Forwarded-For` and `X-Forwarded-Proto` the way Caddy's `reverse_proxy` does:
+
+- **Peer is in the server's `trusted_proxies`:** the inbound values are kept, and the peer's address is
+  appended to `X-Forwarded-For`.
+- **Any other peer:** inbound values are discarded. `X-Forwarded-For` is the peer's address and
+  `X-Forwarded-Proto` is the connection's scheme.
+
+Inbound `Forwarded` and `X-Forwarded-Host` are never passed on. Other headers, `X-Real-IP` included, pass
+through unchanged, so to hand the upstream Caddy's resolved client IP, set it in a `header` handler before
+`consul_proxy` (`X-Real-IP {client_ip}`).
+
+#### Route info for earlier handlers
+
+`consul_route_info` looks the request up in the same route table and exposes the match as request
+variables, without routing it. Put it before a WAF, logging or rate limiting so they know which service a
+request is for. It sets `{http.vars.consul.service}` to the service name, plus one variable per `var`,
+taken from the instance's `key=value` tags:
+
+```caddyfile
+route {
+    consul_route_info {
+        var tenant X-Tenant    # instance tagged X-Tenant=acme -> {http.vars.tenant} = acme
+    }
+    # ... WAF, log_append, etc. ...
+    consul_proxy
+}
+```
+
+Nothing is set when no route matches (or a tag is missing), so placeholders resolve to empty.
+
 ### TCP Routing
 
 TCP routes open self-managed in-process listeners (no caddy-l4, no admin API, no config reload):

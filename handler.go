@@ -129,7 +129,29 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		Host:   upstream.Address,
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	proxy := &httputil.ReverseProxy{
+		// Rewrite rather than Director: with Rewrite, ReverseProxy strips inbound Forwarded and
+		// X-Forwarded-* before calling it and appends nothing itself, so the headers below are
+		// exactly what the upstream gets (a Director's X-Forwarded-For got the client IP
+		// appended a second time).
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(targetURL)
+
+			// Strip prefix if configured
+			if route.StripPrefix && route.Path != "" && route.Path != "/" {
+				pr.Out.URL.Path = strings.TrimPrefix(pr.Out.URL.Path, route.Path)
+				if pr.Out.URL.Path == "" {
+					pr.Out.URL.Path = "/"
+				}
+				pr.Out.URL.RawPath = strings.TrimPrefix(pr.Out.URL.RawPath, route.Path)
+			}
+
+			// Preserve original Host header for virtual hosting (SetURL set it to the upstream)
+			pr.Out.Host = r.Host
+
+			setForwardedHeaders(pr.Out.Header, r)
+		},
+	}
 	proxy.Transport = h.transport
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		if route.Via != "" {
@@ -151,40 +173,34 @@ func (h *ConsulProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, n
 		w.WriteHeader(http.StatusBadGateway)
 	}
 
-	// Custom director for path rewriting and header injection
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+	proxy.ServeHTTP(w, r)
+	return nil
+}
 
-		// Strip prefix if configured
-		if route.StripPrefix && route.Path != "" && route.Path != "/" {
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, route.Path)
-			if req.URL.Path == "" {
-				req.URL.Path = "/"
-			}
-			req.URL.RawPath = strings.TrimPrefix(req.URL.RawPath, route.Path)
-		}
+// setForwardedHeaders sets X-Forwarded-For and X-Forwarded-Proto on the outbound request the
+// way Caddy's reverse_proxy does. If the peer is a trusted proxy (the server's
+// trusted_proxies), the inbound values are kept and the peer is appended to X-Forwarded-For.
+// Otherwise the inbound values are discarded: X-Forwarded-For is just the peer and
+// X-Forwarded-Proto is this connection's scheme, so clients can't forge them.
+func setForwardedHeaders(out http.Header, in *http.Request) {
+	trusted, _ := caddyhttp.GetVar(in.Context(), caddyhttp.TrustedProxyVarKey).(bool)
 
-		// Preserve original Host header for virtual hosting
-		req.Host = r.Host
-
-		// Set standard proxy headers
-		if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			if prior := req.Header.Get("X-Forwarded-For"); prior != "" {
-				req.Header.Set("X-Forwarded-For", prior+", "+clientIP)
-			} else {
-				req.Header.Set("X-Forwarded-For", clientIP)
-			}
-		}
-		if r.TLS != nil {
-			req.Header.Set("X-Forwarded-Proto", "https")
+	if peer, _, err := net.SplitHostPort(in.RemoteAddr); err == nil {
+		prior := strings.Join(in.Header.Values("X-Forwarded-For"), ", ")
+		if trusted && prior != "" {
+			out.Set("X-Forwarded-For", prior+", "+peer)
 		} else {
-			req.Header.Set("X-Forwarded-Proto", "http")
+			out.Set("X-Forwarded-For", peer)
 		}
 	}
 
-	proxy.ServeHTTP(w, r)
-	return nil
+	if proto := in.Header.Get("X-Forwarded-Proto"); trusted && proto != "" {
+		out.Set("X-Forwarded-Proto", proto)
+	} else if in.TLS != nil {
+		out.Set("X-Forwarded-Proto", "https")
+	} else {
+		out.Set("X-Forwarded-Proto", "http")
+	}
 }
 
 // UnmarshalCaddyfile parses the consul_proxy directive. It takes no arguments.
