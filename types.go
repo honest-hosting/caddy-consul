@@ -132,12 +132,13 @@ type RouteDefinition struct {
 	StripPrefix      bool
 	Enabled          bool
 	Upstreams        []Upstream
-	Via              string // routing tag value for X-Caddy-Consul-Via header
-	RedirectCode     int    // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
-	RedirectURL      string // redirect target URL template (may contain {http.request.uri})
-	RedirectNoCache  bool   // if true, send no-cache headers on redirect responses
-	NoCacheStatusRaw string // raw no-cache-status spec from metadata (empty = opt-out if HasNoCacheStatus)
-	HasNoCacheStatus bool   // true if caddy-no-cache-status key was present (distinguishes unset from empty)
+	Via              string            // routing tag value for X-Caddy-Consul-Via header
+	RedirectCode     int               // HTTP redirect status code (301, 302, etc.); 0 = not a redirect
+	RedirectURL      string            // redirect target URL template (may contain {http.request.uri})
+	RedirectNoCache  bool              // if true, send no-cache headers on redirect responses
+	NoCacheStatusRaw string            // raw no-cache-status spec from metadata (empty = opt-out if HasNoCacheStatus)
+	HasNoCacheStatus bool              // true if caddy-no-cache-status key was present (distinguishes unset from empty)
+	TagValues        map[string]string // key=value tags of the instance the route came from (see consul_route_info)
 }
 
 // IsRedirect returns true if this route is an HTTP redirect (not a proxy).
@@ -171,9 +172,10 @@ type CompiledHTTPRoute struct {
 	Via             string // routing tag for X-Caddy-Consul-Via response header
 	RedirectCode    int
 	RedirectURL     string
-	RedirectNoCache bool           // if true, send no-cache headers on redirect responses
-	NoCacheMatcher  *StatusMatcher `json:"-"` // per-service no-cache matcher; nil = use global
-	NoCacheOptOut   bool           // true = service explicitly opted out of no-cache headers
+	RedirectNoCache bool              // if true, send no-cache headers on redirect responses
+	NoCacheMatcher  *StatusMatcher    `json:"-"` // per-service no-cache matcher; nil = use global
+	NoCacheOptOut   bool              // true = service explicitly opted out of no-cache headers
+	TagValues       map[string]string `json:",omitempty"` // key=value service tags, read by consul_route_info
 }
 
 // CompiledTCPRoute is a Consul-managed TCP route ready for injection into Caddy config.

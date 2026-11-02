@@ -93,6 +93,7 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 				RedirectNoCache: r.RedirectNoCache,
 				NoCacheMatcher:  noCacheMatcher,
 				NoCacheOptOut:   noCacheOptOut,
+				TagValues:       r.TagValues,
 			})
 			continue
 		}
@@ -123,6 +124,7 @@ func (rc *RouteCompiler) compileHTTPRoutes(routes []RouteDefinition) ([]Compiled
 			Via:            r.Via,
 			NoCacheMatcher: noCacheMatcher,
 			NoCacheOptOut:  noCacheOptOut,
+			TagValues:      r.TagValues,
 		})
 	}
 

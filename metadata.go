@@ -106,9 +106,11 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 			continue
 		}
 
+		tagValues := parseTagValues(inst.Tags)
 		for _, r := range routes {
 			r.ServiceName = svc.Name
 			r.UpstreamMode = UpstreamDirect
+			r.TagValues = tagValues
 			allRoutes = append(allRoutes, instanceRoute{route: r, upstream: upstream})
 		}
 	}
@@ -180,6 +182,26 @@ func ParseServiceRoutes(svc *ServiceState, serviceTag, connectTag string, logger
 	}
 
 	return enabled
+}
+
+// parseTagValues returns the instance's key=value tags as a map (first occurrence of a key
+// wins), or nil if it has none. Tags without '=' and tags with an empty key are skipped.
+// Routes that share upstreams keep the map of the first instance that produced them.
+func parseTagValues(tags []string) map[string]string {
+	var values map[string]string
+	for _, t := range tags {
+		k, v, ok := strings.Cut(t, "=")
+		if !ok || k == "" {
+			continue
+		}
+		if values == nil {
+			values = make(map[string]string)
+		}
+		if _, seen := values[k]; !seen {
+			values[k] = v
+		}
+	}
+	return values
 }
 
 // instanceHasTag returns true if the instance's own Tags contain the given tag.

@@ -68,12 +68,12 @@ func TestTCPTable_SNI_Precedence(t *testing.T) {
 		sni  string
 		want string
 	}{
-		{"exact.klmh.co", "exact"},     // exact beats wildcard
-		{"other.klmh.co", "wild"},      // wildcard match
-		{"deep.sub.klmh.co", "wild"},   // wildcard is single-label? matchHost suffix => matches
-		{"klmh.co", "default"},         // apex doesn't match *.klmh.co => default
+		{"exact.klmh.co", "exact"},         // exact beats wildcard
+		{"other.klmh.co", "wild"},          // wildcard match
+		{"deep.sub.klmh.co", "wild"},       // wildcard is single-label? matchHost suffix => matches
+		{"klmh.co", "default"},             // apex doesn't match *.klmh.co => default
 		{"nomatch.example.org", "default"}, // unrelated => default
-		{"", "default"},                // no SNI => default
+		{"", "default"},                    // no SNI => default
 	}
 	for _, c := range cases {
 		r := pr.match(c.sni)
