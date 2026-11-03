@@ -1,7 +1,9 @@
 package caddyconsul
 
 import (
+	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -39,6 +41,47 @@ type MetricsCollector struct {
 	TCPNoUpstream         prometheus.Counter
 	TCPUpstreamDialErrors prometheus.Counter
 	TCPForceClosed        prometheus.Counter
+
+	// Per-route request counter (consul_route_info `metrics`). Created on first use, because its
+	// extra label names come from handler config; see RouteRequestsCounter.
+	routeRequestsMu     sync.Mutex
+	routeRequests       *prometheus.CounterVec
+	routeRequestsLabels []string
+}
+
+// RouteRequestsMetric is the per-route request counter's name.
+const RouteRequestsMetric = "caddy_consul_route_requests_total"
+
+// RouteRequestsCounter returns the per-route request counter, labelled
+// service, <extraLabels...>, class, error (in that order), creating and registering it on first
+// use. It lives in the global collector, so it survives config reloads. A counter can have only
+// one label set, so every consul_route_info with metrics enabled must use the same extra label
+// names; a different set is an error. Returns nil, nil when metrics are disabled.
+func (m *MetricsCollector) RouteRequestsCounter(extraLabels []string) (*prometheus.CounterVec, error) {
+	if m == nil {
+		return nil, nil
+	}
+	labels := append(append([]string{"service"}, extraLabels...), "class", "error")
+
+	m.routeRequestsMu.Lock()
+	defer m.routeRequestsMu.Unlock()
+	if m.routeRequests != nil {
+		if !slices.Equal(m.routeRequestsLabels, labels) {
+			return nil, fmt.Errorf("%s already registered with labels %v; every consul_route_info with metrics enabled must use the same metric_labels (got %v)",
+				RouteRequestsMetric, m.routeRequestsLabels, labels)
+		}
+		return m.routeRequests, nil
+	}
+
+	cv := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: RouteRequestsMetric,
+		Help: "Requests matched to a Consul route, by service, configured tag labels, status class, and whether a handler (e.g. a WAF) ended the request with an error",
+	}, labels)
+	if err := m.registry.Register(cv); err != nil {
+		return nil, err
+	}
+	m.routeRequests, m.routeRequestsLabels = cv, labels
+	return cv, nil
 }
 
 var (
