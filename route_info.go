@@ -1,13 +1,17 @@
 package caddyconsul
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -31,12 +35,32 @@ const ServiceVarKey = "consul.service"
 // from the service instance's key=value tags. With `"vars": {"tenant": "X-Tenant"}` and an
 // instance tagged `X-Tenant=acme`, {http.vars.tenant} is "acme". Nothing is set when no route
 // matches or a tag is absent, so placeholders resolve to empty.
+//
+// With Metrics, it also counts every request that matched a route in
+// caddy_consul_route_requests_total{service, <metric_labels...>, class, error}: class is the
+// final status class ("2xx".."5xx"), error is "true" when a later handler ended the request with
+// an error instead of a response (e.g. a WAF block, which Caddy's error routes then render).
+// MetricLabels adds one label per entry, from the instance's key=value tags (e.g. tenant). It
+// needs the consul app's `metrics` option and is served with caddy-consul's other metrics
+// (consul_metrics handler, or the admin /consul/metrics route).
 type ConsulRouteInfoHandler struct {
 	// Vars maps request variable names to the tag keys to read them from.
 	Vars map[string]string `json:"vars,omitempty"`
 
-	routeTable *RouteTable
+	// Metrics enables the per-route request counter.
+	Metrics bool `json:"metrics,omitempty"`
+
+	// MetricLabels maps extra counter label names to the tag keys to read them from. Keep it to
+	// low-cardinality, trusted values (they come from Consul tags, never from the request).
+	MetricLabels map[string]string `json:"metric_labels,omitempty"`
+
+	routeTable   *RouteTable
+	counter      *prometheus.CounterVec
+	labelNames   []string // MetricLabels keys, sorted (the counter's extra labels, in order)
+	labelTagKeys []string // tag key for each of labelNames
 }
+
+var metricLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 // CaddyModule returns the Caddy module information.
 func (ConsulRouteInfoHandler) CaddyModule() caddy.ModuleInfo {
@@ -63,15 +87,92 @@ func (h *ConsulRouteInfoHandler) Provision(ctx caddy.Context) error {
 		return fmt.Errorf("consul_route_info: consul app route table not initialized")
 	}
 
+	if !h.Metrics {
+		if len(h.MetricLabels) > 0 {
+			return fmt.Errorf("consul_route_info: metric_labels set without metrics")
+		}
+		return nil
+	}
+	if consulApp.metrics == nil {
+		return fmt.Errorf("consul_route_info: metrics needs the consul app's `metrics` option")
+	}
+	h.labelNames, h.labelTagKeys = nil, nil
+	for name := range h.MetricLabels {
+		if !metricLabelName.MatchString(name) || name == "service" || name == "class" || name == "error" {
+			return fmt.Errorf("consul_route_info: invalid metric label name %q", name)
+		}
+		h.labelNames = append(h.labelNames, name)
+	}
+	slices.Sort(h.labelNames)
+	for _, name := range h.labelNames {
+		h.labelTagKeys = append(h.labelTagKeys, h.MetricLabels[name])
+	}
+	if h.counter, err = consulApp.metrics.RouteRequestsCounter(h.labelNames); err != nil {
+		return fmt.Errorf("consul_route_info: %w", err)
+	}
 	return nil
 }
 
-// ServeHTTP sets the route variables for the request, if any, and calls next.
+// ServeHTTP sets the route variables for the request, if any, calls next, and counts the
+// outcome when metrics are enabled.
 func (h *ConsulRouteInfoHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	if route := h.routeTable.Match(r.Host, r.URL.Path); route != nil {
-		setRouteVars(r, route, h.Vars)
+	route := h.routeTable.Match(r.Host, r.URL.Path)
+	if route == nil {
+		return next.ServeHTTP(w, r)
 	}
-	return next.ServeHTTP(w, r)
+	setRouteVars(r, route, h.Vars)
+	if h.counter == nil {
+		return next.ServeHTTP(w, r)
+	}
+
+	rec := &statusRecorder{ResponseWriterWrapper: &caddyhttp.ResponseWriterWrapper{ResponseWriter: w}}
+	err := next.ServeHTTP(rec, r)
+	h.counter.WithLabelValues(h.labelValues(route, rec.status, err)...).Inc()
+	return err
+}
+
+// labelValues builds the counter's label values: service, the configured tag labels, class,
+// error. A handler error's status (e.g. the WAF's 403) wins over anything written so far.
+func (h *ConsulRouteInfoHandler) labelValues(route *CompiledHTTPRoute, status int, err error) []string {
+	errored := "false"
+	if err != nil {
+		errored, status = "true", http.StatusInternalServerError
+		var he caddyhttp.HandlerError
+		if errors.As(err, &he) && he.StatusCode != 0 {
+			status = he.StatusCode
+		}
+	} else if status == 0 {
+		status = http.StatusOK // body written without WriteHeader, or nothing written at all
+	}
+
+	values := make([]string, 0, len(h.labelTagKeys)+3)
+	values = append(values, route.ServiceName)
+	for _, key := range h.labelTagKeys {
+		values = append(values, route.TagValues[key])
+	}
+	return append(values, fmt.Sprintf("%dxx", status/100), errored)
+}
+
+// statusRecorder records the first final status written. The embedded ResponseWriterWrapper
+// keeps Flush/Hijack/Push reachable (via Unwrap / http.ResponseController), so streaming
+// responses and WebSocket upgrades behave as before.
+type statusRecorder struct {
+	*caddyhttp.ResponseWriterWrapper
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	if sr.status == 0 && code >= 200 {
+		sr.status = code
+	}
+	sr.ResponseWriterWrapper.WriteHeader(code)
+}
+
+func (sr *statusRecorder) Write(b []byte) (int, error) {
+	if sr.status == 0 {
+		sr.status = http.StatusOK
+	}
+	return sr.ResponseWriterWrapper.Write(b)
 }
 
 // setRouteVars sets ServiceVarKey and each configured variable present in the route's tags.
@@ -88,6 +189,8 @@ func setRouteVars(r *http.Request, route *CompiledHTTPRoute, vars map[string]str
 //
 //	consul_route_info {
 //		var <name> <tag-key>
+//		metrics
+//		metric_label <name> <tag-key>
 //	}
 func (h *ConsulRouteInfoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -108,6 +211,23 @@ func (h *ConsulRouteInfoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) erro
 				h.Vars = make(map[string]string)
 			}
 			h.Vars[name] = tagKey
+		case "metrics":
+			if d.NextArg() {
+				return d.ArgErr()
+			}
+			h.Metrics = true
+		case "metric_label":
+			var name, tagKey string
+			if !d.Args(&name, &tagKey) {
+				return d.ArgErr()
+			}
+			if d.NextArg() {
+				return d.ArgErr()
+			}
+			if h.MetricLabels == nil {
+				h.MetricLabels = make(map[string]string)
+			}
+			h.MetricLabels[name] = tagKey
 		default:
 			return d.Errf("unrecognized subdirective %q", d.Val())
 		}

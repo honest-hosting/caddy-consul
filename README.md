@@ -549,6 +549,40 @@ route {
 
 Nothing is set when no route matches (or a tag is missing), so placeholders resolve to empty.
 
+With `metrics`, it also counts every request that matched a route, in
+`caddy_consul_route_requests_total{service, <metric_label...>, class, error}`:
+
+- `class`: the final status class (`2xx` … `5xx`).
+- `error`: `"true"` when a later handler ended the request with an error instead of a response. A WAF
+  block is the typical case; Caddy's error routes render it.
+- `metric_label <name> <tag-key>`: adds a label from the instance's `key=value` tags. Keep these
+  low-cardinality; they come from Consul tags, never from the request.
+
+There are no histograms, so it's a handful of series per active service. The counter needs the consul
+app's `metrics` option and is served with caddy-consul's other metrics:
+
+```caddyfile
+consul_route_info {
+    metrics
+    metric_label tenant X-Tenant
+}
+```
+
+#### Metrics without the admin API
+
+caddy-consul's metrics are served on the admin API at `/consul/metrics`. To scrape them with the admin
+API disabled or bound to localhost, use the `consul_metrics` handler on a metrics-only server:
+
+```caddyfile
+http://:2019 {
+    route {
+        metrics /metrics
+        consul_metrics /metrics/consul
+        respond 404
+    }
+}
+```
+
 ### TCP Routing
 
 TCP routes open self-managed in-process listeners (no caddy-l4, no admin API, no config reload):
