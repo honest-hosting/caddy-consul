@@ -40,9 +40,11 @@ const ServiceVarKey = "consul.service"
 // caddy_consul_route_requests_total{service, <metric_labels...>, class, error}: class is the
 // final status class ("2xx".."5xx"), error is "true" when a later handler ended the request with
 // an error instead of a response (e.g. a WAF block, which Caddy's error routes then render).
-// MetricLabels adds one label per entry, from the instance's key=value tags (e.g. tenant). It
-// needs the consul app's `metrics` option and is served with caddy-consul's other metrics
-// (consul_metrics handler, or the admin /consul/metrics route).
+// MetricLabels adds one label per entry, from the instance's key=value tags (e.g. tenant), and
+// HostLabel names a label carrying the matched route's host (from the route table, not the
+// request's Host header, so it is bounded by the configured routes). It needs the consul app's
+// `metrics` option and is served with caddy-consul's other metrics (consul_metrics handler, or
+// the admin /consul/metrics route).
 type ConsulRouteInfoHandler struct {
 	// Vars maps request variable names to the tag keys to read them from.
 	Vars map[string]string `json:"vars,omitempty"`
@@ -54,10 +56,14 @@ type ConsulRouteInfoHandler struct {
 	// low-cardinality, trusted values (they come from Consul tags, never from the request).
 	MetricLabels map[string]string `json:"metric_labels,omitempty"`
 
+	// HostLabel, if set, adds a counter label with this name holding the matched route's host
+	// (e.g. "host" -> host="blog.example.com"). Redirect routes (aliases) count under their own host.
+	HostLabel string `json:"host_label,omitempty"`
+
 	routeTable   *RouteTable
 	counter      *prometheus.CounterVec
-	labelNames   []string // MetricLabels keys, sorted (the counter's extra labels, in order)
-	labelTagKeys []string // tag key for each of labelNames
+	labelNames   []string // extra counter labels in order: MetricLabels keys + HostLabel, sorted
+	labelTagKeys []string // tag key for each of labelNames ("" = the route host, for HostLabel)
 }
 
 var metricLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -88,29 +94,50 @@ func (h *ConsulRouteInfoHandler) Provision(ctx caddy.Context) error {
 	}
 
 	if !h.Metrics {
-		if len(h.MetricLabels) > 0 {
-			return fmt.Errorf("consul_route_info: metric_labels set without metrics")
+		if len(h.MetricLabels) > 0 || h.HostLabel != "" {
+			return fmt.Errorf("consul_route_info: metric_labels / host_label set without metrics")
 		}
 		return nil
 	}
 	if consulApp.metrics == nil {
 		return fmt.Errorf("consul_route_info: metrics needs the consul app's `metrics` option")
 	}
-	h.labelNames, h.labelTagKeys = nil, nil
-	for name := range h.MetricLabels {
-		if !metricLabelName.MatchString(name) || name == "service" || name == "class" || name == "error" {
-			return fmt.Errorf("consul_route_info: invalid metric label name %q", name)
-		}
-		h.labelNames = append(h.labelNames, name)
-	}
-	slices.Sort(h.labelNames)
-	for _, name := range h.labelNames {
-		h.labelTagKeys = append(h.labelTagKeys, h.MetricLabels[name])
+	if h.labelNames, h.labelTagKeys, err = h.metricLabelLayout(); err != nil {
+		return err
 	}
 	if h.counter, err = consulApp.metrics.RouteRequestsCounter(h.labelNames); err != nil {
 		return fmt.Errorf("consul_route_info: %w", err)
 	}
 	return nil
+}
+
+// metricLabelLayout returns the counter's extra label names (sorted) and, for each, the tag key
+// to read it from ("" = the matched route's host, for HostLabel).
+func (h *ConsulRouteInfoHandler) metricLabelLayout() (names, tagKeys []string, err error) {
+	sources := make(map[string]string, len(h.MetricLabels)+1)
+	for name, tagKey := range h.MetricLabels {
+		if tagKey == "" {
+			return nil, nil, fmt.Errorf("consul_route_info: metric label %q has an empty tag key", name)
+		}
+		sources[name] = tagKey
+	}
+	if h.HostLabel != "" {
+		if _, dup := sources[h.HostLabel]; dup {
+			return nil, nil, fmt.Errorf("consul_route_info: host_label %q is also a metric_labels name", h.HostLabel)
+		}
+		sources[h.HostLabel] = ""
+	}
+	for name := range sources {
+		if !metricLabelName.MatchString(name) || name == "service" || name == "class" || name == "error" {
+			return nil, nil, fmt.Errorf("consul_route_info: invalid metric label name %q", name)
+		}
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		tagKeys = append(tagKeys, sources[name])
+	}
+	return names, tagKeys, nil
 }
 
 // ServeHTTP sets the route variables for the request, if any, calls next, and counts the
@@ -148,7 +175,11 @@ func (h *ConsulRouteInfoHandler) labelValues(route *CompiledHTTPRoute, status in
 	values := make([]string, 0, len(h.labelTagKeys)+3)
 	values = append(values, route.ServiceName)
 	for _, key := range h.labelTagKeys {
-		values = append(values, route.TagValues[key])
+		if key == "" {
+			values = append(values, route.Host)
+		} else {
+			values = append(values, route.TagValues[key])
+		}
 	}
 	return append(values, fmt.Sprintf("%dxx", status/100), errored)
 }
@@ -191,6 +222,7 @@ func setRouteVars(r *http.Request, route *CompiledHTTPRoute, vars map[string]str
 //		var <name> <tag-key>
 //		metrics
 //		metric_label <name> <tag-key>
+//		metric_host_label <name>
 //	}
 func (h *ConsulRouteInfoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	d.Next() // consume directive name
@@ -228,6 +260,13 @@ func (h *ConsulRouteInfoHandler) UnmarshalCaddyfile(d *caddyfile.Dispenser) erro
 				h.MetricLabels = make(map[string]string)
 			}
 			h.MetricLabels[name] = tagKey
+		case "metric_host_label":
+			if !d.Args(&h.HostLabel) {
+				return d.ArgErr()
+			}
+			if d.NextArg() {
+				return d.ArgErr()
+			}
 		default:
 			return d.Errf("unrecognized subdirective %q", d.Val())
 		}

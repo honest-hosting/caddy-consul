@@ -1,7 +1,6 @@
 package caddyconsul
 
 import (
-	"fmt"
 	"net/http"
 	"slices"
 	"sync"
@@ -43,10 +42,13 @@ type MetricsCollector struct {
 	TCPForceClosed        prometheus.Counter
 
 	// Per-route request counter (consul_route_info `metrics`). Created on first use, because its
-	// extra label names come from handler config; see RouteRequestsCounter.
-	routeRequestsMu     sync.Mutex
-	routeRequests       *prometheus.CounterVec
-	routeRequestsLabels []string
+	// extra label names come from handler config; see RouteRequestsCounter. It lives in its own
+	// registry: a Prometheus registry never forgets a metric's label names (Unregister keeps
+	// them), so a label change needs a fresh registry. ServeHTTP gathers both.
+	routeRequestsMu       sync.Mutex
+	routeRequests         *prometheus.CounterVec
+	routeRequestsLabels   []string
+	routeRequestsRegistry *prometheus.Registry
 }
 
 // RouteRequestsMetric is the per-route request counter's name.
@@ -54,9 +56,13 @@ const RouteRequestsMetric = "caddy_consul_route_requests_total"
 
 // RouteRequestsCounter returns the per-route request counter, labelled
 // service, <extraLabels...>, class, error (in that order), creating and registering it on first
-// use. It lives in the global collector, so it survives config reloads. A counter can have only
-// one label set, so every consul_route_info with metrics enabled must use the same extra label
-// names; a different set is an error. Returns nil, nil when metrics are disabled.
+// use. It lives in the global collector, so it survives config reloads with the same labels.
+//
+// A metric can have only one label set. When a (re)loaded config asks for a different one, the
+// old counter is unregistered and replaced (its counts restart from zero), so changing
+// metric_labels works with a plain config reload. Within one config, every consul_route_info
+// with metrics enabled must use the same labels: the last one provisioned wins. Returns nil, nil
+// when metrics are disabled.
 func (m *MetricsCollector) RouteRequestsCounter(extraLabels []string) (*prometheus.CounterVec, error) {
 	if m == nil {
 		return nil, nil
@@ -66,22 +72,39 @@ func (m *MetricsCollector) RouteRequestsCounter(extraLabels []string) (*promethe
 	m.routeRequestsMu.Lock()
 	defer m.routeRequestsMu.Unlock()
 	if m.routeRequests != nil {
-		if !slices.Equal(m.routeRequestsLabels, labels) {
-			return nil, fmt.Errorf("%s already registered with labels %v; every consul_route_info with metrics enabled must use the same metric_labels (got %v)",
-				RouteRequestsMetric, m.routeRequestsLabels, labels)
+		if slices.Equal(m.routeRequestsLabels, labels) {
+			return m.routeRequests, nil
 		}
-		return m.routeRequests, nil
+		if m.logger != nil {
+			m.logger.Warn("replacing route request counter: label set changed (counts restart)",
+				zap.String("metric", RouteRequestsMetric),
+				zap.Strings("old_labels", m.routeRequestsLabels),
+				zap.Strings("new_labels", labels))
+		}
+		m.routeRequests, m.routeRequestsLabels, m.routeRequestsRegistry = nil, nil, nil
 	}
 
 	cv := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: RouteRequestsMetric,
 		Help: "Requests matched to a Consul route, by service, configured tag labels, status class, and whether a handler (e.g. a WAF) ended the request with an error",
 	}, labels)
-	if err := m.registry.Register(cv); err != nil {
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(cv); err != nil {
 		return nil, err
 	}
-	m.routeRequests, m.routeRequestsLabels = cv, labels
+	m.routeRequests, m.routeRequestsLabels, m.routeRequestsRegistry = cv, labels, registry
 	return cv, nil
+}
+
+// gatherer returns everything ServeHTTP serves: the collector's registry plus the route request
+// counter's (when one exists).
+func (m *MetricsCollector) gatherer() prometheus.Gatherer {
+	m.routeRequestsMu.Lock()
+	defer m.routeRequestsMu.Unlock()
+	if m.routeRequestsRegistry == nil {
+		return m.registry
+	}
+	return prometheus.Gatherers{m.registry, m.routeRequestsRegistry}
 }
 
 var (
@@ -344,5 +367,5 @@ func (m *MetricsCollector) IncTCPDialError() {
 
 // ServeHTTP handles Prometheus metrics scraping.
 func (m *MetricsCollector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
+	promhttp.HandlerFor(m.gatherer(), promhttp.HandlerOpts{}).ServeHTTP(w, r)
 }
