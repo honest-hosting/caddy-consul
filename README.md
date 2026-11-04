@@ -557,6 +557,12 @@ With `metrics`, it also counts every request that matched a route, in
   block is the typical case; Caddy's error routes render it.
 - `metric_label <name> <tag-key>`: adds a label from the instance's `key=value` tags. Keep these
   low-cardinality; they come from Consul tags, never from the request.
+- `metric_host_label <name>`: adds a label holding the matched route's host. It comes from the route
+  table, not the request's `Host` header, so it's bounded by your configured routes. Redirect routes
+  (aliases) count under their own host.
+
+Changing these labels with a config reload replaces the counter (its counts restart). Within one config,
+use the same labels on every `consul_route_info` that has `metrics`.
 
 There are no histograms, so it's a handful of series per active service. The counter needs the consul
 app's `metrics` option and is served with caddy-consul's other metrics:
@@ -565,6 +571,7 @@ app's `metrics` option and is served with caddy-consul's other metrics:
 consul_route_info {
     metrics
     metric_label tenant X-Tenant
+    metric_host_label host
 }
 ```
 

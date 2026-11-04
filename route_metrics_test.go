@@ -28,8 +28,38 @@ func TestRouteRequestsCounter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Same(t, first, again, "same label set reuses the counter (config reloads)")
 
-	_, err = m.RouteRequestsCounter([]string{"tenant"})
-	assert.Error(t, err, "a different label set can't share the metric")
+	// A config reload with different labels replaces the counter (no provisioning error)
+	replaced, err := m.RouteRequestsCounter([]string{"host", "tenant"})
+	require.NoError(t, err)
+	assert.NotSame(t, first, replaced)
+	replaced.WithLabelValues("site-1", "blog.example.com", "acme", "2xx", "false").Inc()
+	n, err := testutil.GatherAndCount(m.gatherer(), RouteRequestsMetric)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "only the new counter is served")
+
+	// ...and served together with the collector's own metrics, with the new labels
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	assert.Contains(t, w.Body.String(), `caddy_consul_route_requests_total{class="2xx",error="false",host="blog.example.com",service="site-1",tenant="acme"} 1`)
+	assert.Contains(t, w.Body.String(), "caddy_consul_services_total")
+}
+
+func TestMetricLabelLayout(t *testing.T) {
+	h := &ConsulRouteInfoHandler{MetricLabels: map[string]string{"tenant": "X-Tenant", "site": "X-Site"}, HostLabel: "host"}
+	names, keys, err := h.metricLabelLayout()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"host", "site", "tenant"}, names)
+	assert.Equal(t, []string{"", "X-Site", "X-Tenant"}, keys, `"" = the matched route's host`)
+
+	for _, bad := range []*ConsulRouteInfoHandler{
+		{MetricLabels: map[string]string{"tenant": ""}},
+		{MetricLabels: map[string]string{"host": "X-Host"}, HostLabel: "host"},
+		{MetricLabels: map[string]string{"class": "X-Class"}},
+		{HostLabel: "bad-name"},
+	} {
+		_, _, err := bad.metricLabelLayout()
+		assert.Error(t, err, "%+v", bad)
+	}
 }
 
 // metricsHandler returns a consul_route_info handler with metrics on, as Provision would set it up.
@@ -42,23 +72,25 @@ func metricsHandler(t *testing.T) (*ConsulRouteInfoHandler, *MetricsCollector) {
 		TagValues: map[string]string{"X-Tenant": "acme", "X-Site": "blog"},
 	}})
 	m := newMetricsCollector(zap.NewNop())
-	labels := []string{"site", "tenant"}
-	cv, err := m.RouteRequestsCounter(labels)
-	require.NoError(t, err)
-	return &ConsulRouteInfoHandler{
+	h := &ConsulRouteInfoHandler{
 		Metrics:      true,
 		MetricLabels: map[string]string{"tenant": "X-Tenant", "site": "X-Site"},
+		HostLabel:    "host",
 		routeTable:   rt,
-		counter:      cv,
-		labelNames:   labels,
-		labelTagKeys: []string{"X-Site", "X-Tenant"},
-	}, m
+	}
+	var err error
+	h.labelNames, h.labelTagKeys, err = h.metricLabelLayout()
+	require.NoError(t, err)
+	h.counter, err = m.RouteRequestsCounter(h.labelNames)
+	require.NoError(t, err)
+	return h, m
 }
 
 func TestConsulRouteInfo_Metrics(t *testing.T) {
 	h, _ := metricsHandler(t)
 	count := func(class, errored string) float64 {
-		return testutil.ToFloat64(h.counter.WithLabelValues("site-1", "blog", "acme", class, errored))
+		// service, host, site, tenant, class, error
+		return testutil.ToFloat64(h.counter.WithLabelValues("site-1", "blog.example.com", "blog", "acme", class, errored))
 	}
 	serve := func(host string, next caddyhttp.HandlerFunc) error {
 		r := withVars(httptest.NewRequest(http.MethodGet, "http://"+host+"/", nil), map[string]any{})
@@ -122,13 +154,17 @@ func TestConsulRouteInfo_UnmarshalCaddyfile_Metrics(t *testing.T) {
 		metrics
 		metric_label tenant X-Tenant
 		metric_label site X-Site
+		metric_host_label host
 	}`)))
 	assert.True(t, h.Metrics)
 	assert.Equal(t, map[string]string{"tenant": "X-Tenant", "site": "X-Site"}, h.MetricLabels)
+	assert.Equal(t, "host", h.HostLabel)
 
 	for _, bad := range []string{
 		"consul_route_info {\n\tmetrics extra\n}",
 		"consul_route_info {\n\tmetric_label onlyname\n}",
+		"consul_route_info {\n\tmetric_host_label\n}",
+		"consul_route_info {\n\tmetric_host_label a b\n}",
 	} {
 		var h ConsulRouteInfoHandler
 		assert.Error(t, h.UnmarshalCaddyfile(caddyfile.NewTestDispenser(bad)), bad)
